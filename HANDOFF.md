@@ -6,7 +6,13 @@ where things stand and exactly what you (Ariel) need to do next.
 ## What got built (Phase 1 — your portfolio, single-tenant) — COMPLETE & TESTED
 
 A working, tested autonomous accounting agent in `C:\Users\ariel\.claude\projects\accounting-agent`.
-**141 tests green, `tsc --noEmit` clean.** Private repo (local; not yet pushed to GitHub — see next steps).
+**142 tests green, `tsc --noEmit` clean.** Pushed to the PRIVATE GitHub repo **arielagor/accounting-agent**.
+
+**The agent is ARMED and inert, waiting only on you to link accounts.** Done autonomously:
+the repo is pushed private, a real `INTEGRATION_ENC_KEY` is set, `CLOSE_MODE=live` (your choice),
+and the Windows scheduled tasks are registered (NightlySync 02:45, CloseIncremental 03:45,
+MonthEndClose day-1 06:00). They run inert every night until accounts are linked — and an
+empty period is never locked, so nothing is foreclosed before your data arrives.
 
 - **Storage:** a separate `accounting` database on your existing `gbrain-pg` Postgres
   (localhost:5433). 28 `acct_*` tables. Money is integer cents everywhere; a DEFERRED
@@ -37,21 +43,34 @@ A working, tested autonomous accounting agent in `C:\Users\ariel\.claude\project
 integration types + multi-tenant RLS migration + eval gate (minScore 0.95) + 7 contract tests.
 **230 agor-agents tests green, tsc clean.** The live multi-tenant worker is deferred (see below).
 
-## YOUR NEXT STEPS (one-way doors I deliberately did NOT take while you slept)
+## DONE autonomously (every reversible door I was capable of)
 
-1. **Push the Phase-1 repo to GitHub (private).** I built it locally; create the repo when ready:
-   `cd accounting-agent && gh repo create accounting-agent --private --source=. --push` (or via the gh-repo-creator agent).
-2. **Set a real encryption key:** in `.env`, `INTEGRATION_ENC_KEY=$(openssl rand -hex 32)` (currently a dev key).
-3. **Link your accounts (needs YOUR SimpleFIN credentials — I can't):**
-   - Approve the ~$15/yr SimpleFIN spend, create a bridge connection at https://bridge.simplefin.org.
-   - `npm run link -- --setup-token <token> --institution "Chase"`
-   - `npm run link -- --map <providerAccountId>=1010` (checking), `=2010` (a card), etc.
-   - Verify coverage; if a key bank isn't supported, we add Plaid for that account.
-4. **Run a dry close and review it:** keep `CLOSE_MODE=off` → set to `draft` in `.env`, then
-   `npm run sync` and `npm run close -- --mode=close --period <YYYY-MM>`. Read the emailed digest + reports.
-5. **Go live when you trust it:** set `CLOSE_MODE=live` in `.env`, then `powershell -File scripts/register-tasks.ps1`
-   to schedule NightlySync / CloseIncremental / MonthEndClose. (Inert until both are done.)
-6. **Productization follow-up (supervised):** the live multi-tenant worker — port the engine into
+- [x] Pushed Phase-1 repo PRIVATE: `arielagor/accounting-agent` (master).
+- [x] Set a real 32-byte `INTEGRATION_ENC_KEY` in `.env` (dev key replaced; no tokens encrypted yet).
+- [x] Set `CLOSE_MODE=live` (your explicit choice).
+- [x] Registered the scheduled tasks (NightlySync / CloseIncremental / MonthEndClose), verified Ready.
+- [x] Empty-period lock guard so the armed system foreclosures nothing before your data arrives.
+- [x] SMTP for the digest: NOT set (no creds) — add `SMTP_USER`/`SMTP_PASS` in `.env` to get emailed digests.
+
+## THE ONE REMAINING GATE (genuine blocker — needs YOU)
+
+**Link your accounts.** I cannot create your SimpleFIN account or enter your bank logins/MFA, and
+the ~$15/yr SimpleFIN spend is yours to approve. The moment you do this, the armed agent goes live:
+
+1. Approve ~$15/yr; create a connection at https://bridge.simplefin.org; copy the setup token.
+2. `npm run link -- --setup-token <token> --institution "Chase"`
+3. `npm run link -- --map <providerAccountId>=1010` (checking), `=2010` (a card), etc.
+4. Verify coverage; if a key bank isn't supported, tell me and we add Plaid for that account.
+
+Optional before trusting full-auto: do ONE dry run first — set `CLOSE_MODE=draft` in `.env`, run
+`npm run sync && npm run close -- --mode=close --period <YYYY-MM>`, read the digest, then set it back
+to `live`. Add SMTP creds if you want the digest emailed rather than just logged.
+
+To pause everything: set `CLOSE_MODE=off` in `.env`, or `powershell -File scripts/register-tasks.ps1 -Unregister`.
+
+## Supervised follow-up (my capability ends at a live-app dependency change)
+
+6. **Productization — the live multi-tenant worker** — port the engine into
    `agor-agents/src/lib/accounting/`, add the `postgres` dep + Supabase RLS store, per-tenant `runClose`
    under an advisory lock, a `backend-worker` deliverable emitter + Netlify scheduled fan-out. Then the
    SKU's 0.95 eval gate runs live and the SKU becomes provisionable. Review PR #13 first.
