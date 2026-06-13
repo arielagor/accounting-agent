@@ -1,0 +1,164 @@
+/**
+ * SimpleFinProvider — read-only aggregation against a SimpleFIN bridge.
+ *
+ * SimpleFIN's auth model: the access TOKEN here IS a SimpleFIN "access URL", which
+ * may embed HTTP basic-auth credentials (https://user:pass@bridge.example/...).
+ * We GET `${accessUrl}/accounts?start-date=<sec>&pending=1` and the bridge returns
+ * the accounts plus their transactions. By construction this provider only READS —
+ * there is no money-movement method anywhere on the interface.
+ *
+ * SimpleFIN amount/date conventions (per the SimpleFIN protocol):
+ *   - `amount` is a DECIMAL DOLLAR STRING, already signed (negative = outflow).
+ *     We convert with toCents — our signed-cents convention matches it directly.
+ *   - `posted` is unix seconds → we format the posted date as YYYY-MM-DD (UTC).
+ *
+ * The pure mapping lives in `parseSimpleFinAccounts` (unit-tested with a JSON
+ * literal, no network); the class is a thin fetch wrapper over it.
+ */
+import type {
+  AggregationProvider,
+  ProviderAccount,
+  ProviderTransaction,
+  ProviderSyncPage,
+} from "../core/types.js";
+import { toCents } from "../core/money.js";
+
+/** ~90 days of seconds — the default lookback when there is no cursor yet. */
+const NINETY_DAYS_SECONDS = 90 * 24 * 60 * 60;
+
+/** Shape of the SimpleFIN /accounts response we consume (only the fields we use). */
+interface SimpleFinTxnJson {
+  id: string;
+  posted: number; // unix seconds
+  amount: string; // signed decimal dollar string
+  description?: string;
+  pending?: boolean;
+  payee?: string;
+  category?: string;
+}
+
+interface SimpleFinAccountJson {
+  id: string;
+  name?: string;
+  currency?: string;
+  balance?: string;
+  org?: { name?: string; domain?: string } | null;
+  transactions?: SimpleFinTxnJson[];
+}
+
+interface SimpleFinResponseJson {
+  accounts?: SimpleFinAccountJson[];
+}
+
+/** Format unix SECONDS as a UTC YYYY-MM-DD date string. */
+function unixSecondsToYmd(sec: number): string {
+  const d = new Date(sec * 1000);
+  const y = d.getUTCFullYear();
+  const m = String(d.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(d.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
+/**
+ * PURE mapper: turn a parsed SimpleFIN /accounts JSON object into our account and
+ * transaction shapes. No network, no clock — deterministic given its input.
+ * Amounts pass through toCents (SimpleFIN's sign already matches our convention:
+ * negative = outflow). Each txn is tagged with its owning provider account id.
+ */
+export function parseSimpleFinAccounts(json: unknown): {
+  accounts: ProviderAccount[];
+  transactions: ProviderTransaction[];
+} {
+  const root = (json ?? {}) as SimpleFinResponseJson;
+  const accountsJson = Array.isArray(root.accounts) ? root.accounts : [];
+
+  const accounts: ProviderAccount[] = [];
+  const transactions: ProviderTransaction[] = [];
+
+  for (const acct of accountsJson) {
+    const currency = (acct.currency ?? "usd").toLowerCase();
+    accounts.push({
+      providerAccountId: acct.id,
+      name: acct.name ?? acct.id,
+      type: acct.org?.name ?? undefined,
+      currency,
+    });
+
+    const txns = Array.isArray(acct.transactions) ? acct.transactions : [];
+    for (const t of txns) {
+      const pending = t.pending === true;
+      transactions.push({
+        providerTxnId: t.id,
+        amountCents: toCents(t.amount), // signed: negative = outflow
+        currency,
+        postedDate: Number.isFinite(t.posted) ? unixSecondsToYmd(t.posted) : null,
+        authorizedDate: null, // SimpleFIN exposes only `posted`
+        pending,
+        description: t.description ?? "",
+        merchantName: t.payee ?? null,
+        categoryProvider: t.category ?? null,
+        raw: t as unknown as Record<string, unknown>,
+        providerAccountId: acct.id,
+      });
+    }
+  }
+
+  return { accounts, transactions };
+}
+
+/** Map a sync cursor to a start-date in unix SECONDS (null cursor → last 90 days). */
+function cursorToStartSeconds(cursor: string | null, nowSeconds: number): number {
+  if (cursor === null) return nowSeconds - NINETY_DAYS_SECONDS;
+  const parsed = Number(cursor);
+  // A non-numeric/garbled cursor fails soft to the 90-day window rather than throwing.
+  if (!Number.isFinite(parsed)) return nowSeconds - NINETY_DAYS_SECONDS;
+  return Math.trunc(parsed);
+}
+
+export class SimpleFinProvider implements AggregationProvider {
+  readonly name = "simplefin";
+
+  /** Strip a single trailing slash so we don't build `//accounts`. */
+  private normalizeUrl(accessUrl: string): string {
+    return accessUrl.endsWith("/") ? accessUrl.slice(0, -1) : accessUrl;
+  }
+
+  async listAccounts(accessToken: string): Promise<ProviderAccount[]> {
+    const json = await this.fetchAccounts(accessToken, null);
+    return parseSimpleFinAccounts(json).accounts;
+  }
+
+  /**
+   * Fetch the window since the cursor's start-date and return every parsed txn as
+   * `added`. SimpleFIN has no incremental removed/modified feed, so removed=[] and
+   * the next cursor is "now in seconds" — the next sync starts where this one ended.
+   */
+  async syncTransactions(
+    accessToken: string,
+    cursor: string | null,
+  ): Promise<ProviderSyncPage> {
+    const json = await this.fetchAccounts(accessToken, cursor);
+    const { transactions } = parseSimpleFinAccounts(json);
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    return {
+      added: transactions,
+      modified: [],
+      removed: [],
+      nextCursor: String(nowSeconds),
+      hasMore: false,
+    };
+  }
+
+  /** Thin GET wrapper — the URL carries any basic-auth creds inline. READ-ONLY. */
+  private async fetchAccounts(accessUrl: string, cursor: string | null): Promise<unknown> {
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const startSec = cursorToStartSeconds(cursor, nowSeconds);
+    const base = this.normalizeUrl(accessUrl);
+    const url = `${base}/accounts?start-date=${startSec}&pending=1`;
+    const res = await fetch(url, { method: "GET" });
+    if (!res.ok) {
+      throw new Error(`SimpleFIN /accounts HTTP ${res.status} ${res.statusText}`);
+    }
+    return (await res.json()) as unknown;
+  }
+}
