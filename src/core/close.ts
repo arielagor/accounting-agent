@@ -159,6 +159,15 @@ export async function runClose(
     await postCategorized(sql, tenantId, t, outcome.result);
   }
 
+  // Resolve any quarantine whose txn is now posted (e.g. a new categorization rule
+  // matched on a re-run, or a human resolution applied). Keeps the review queue
+  // consistent with the ledger so verify doesn't count a posted txn as quarantined.
+  await sql`
+    UPDATE acct_review_queue SET status = 'resolved', resolved_at = now()
+    WHERE status = 'open' AND source_txn_id IN (
+      SELECT e.source_txn_id FROM acct_journal_entries e
+      WHERE e.tenant_id = ${tenantId} AND e.status = 'posted' AND e.source_txn_id LIKE 'raw:%')`;
+
   // ── allocate shared costs ──
   await advance("allocate");
   await allocate(sql, tenantId, period);
