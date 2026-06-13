@@ -50,10 +50,20 @@ export function spawnClaudeRunner(): ClaudeRunner {
         const env = { ...process.env };
         delete env.ANTHROPIC_API_KEY;
 
-        const child = spawn("claude", ["-p", prompt, "--output-format", "text"], {
+        // Pin an explicit model: claude -p defaults to the session's configured model
+        // (Fable), which can be unavailable and then exits 1 on every call. Default to
+        // Sonnet 4.6 (good categorization quality, fast enough at volume); override with
+        // LLM_MODEL. All ride the Max plan ($0) since ANTHROPIC_API_KEY is stripped above.
+        const model = process.env.LLM_MODEL || "claude-sonnet-4-6";
+
+        // stdin MUST be ignored: `claude -p` otherwise waits for piped stdin, warns
+        // "no stdin data received in 3s", and exits 1 — failing every call. Ignoring
+        // stdin makes it use the -p prompt argument immediately. (stdout/stderr piped.)
+        const child = spawn("claude", ["-p", prompt, "--output-format", "text", "--model", model], {
           env,
           shell: false,
           windowsHide: true,
+          stdio: ["ignore", "pipe", "pipe"],
         });
 
         let stdout = "";
