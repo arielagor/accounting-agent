@@ -91,18 +91,21 @@ export async function buildPerProjectPnl(
   period: string,
 ): Promise<ProjectPnl[]> {
   const { start, end } = periodBounds(period);
+  // Tenant filter MUST be a line-level WHERE (via the entry join), not a LEFT JOIN ON
+  // condition — otherwise other tenants' lines on a shared project leak into the sum
+  // and break the tie-out. INNER JOINs + WHERE; the HAVING drops zero-activity projects.
   const rows = await sql<
     { slug: string; name: string; revenue: string; expense: string }[]
   >`
     SELECT p.slug, p.name,
       COALESCE(SUM(CASE WHEN c.type = 'revenue' THEN l.credit_cents - l.debit_cents ELSE 0 END), 0) AS revenue,
       COALESCE(SUM(CASE WHEN c.type IN ('expense','cogs') THEN l.debit_cents - l.credit_cents ELSE 0 END), 0) AS expense
-    FROM acct_projects p
-    LEFT JOIN acct_journal_lines l ON l.project_id = p.id
-    LEFT JOIN acct_journal_entries e ON e.id = l.entry_id
-      AND e.tenant_id = ${tenantId} AND e.status = 'posted'
+    FROM acct_journal_lines l
+    JOIN acct_journal_entries e ON e.id = l.entry_id
+    JOIN acct_projects p ON p.id = l.project_id
+    JOIN acct_chart c ON c.id = l.account_id
+    WHERE e.tenant_id = ${tenantId} AND e.status = 'posted'
       AND e.entry_date BETWEEN ${start} AND ${end}
-    LEFT JOIN acct_chart c ON c.id = l.account_id
     GROUP BY p.slug, p.name
     HAVING COALESCE(SUM(CASE WHEN c.type='revenue' THEN l.credit_cents - l.debit_cents ELSE 0 END),0) <> 0
         OR COALESCE(SUM(CASE WHEN c.type IN ('expense','cogs') THEN l.debit_cents - l.credit_cents ELSE 0 END),0) <> 0
@@ -158,14 +161,21 @@ export async function buildCashPosition(
   period: string,
 ): Promise<CashPosition> {
   const { end } = periodBounds(period);
+  // Aggregate only THIS tenant's lines (in a subquery), then LEFT JOIN so a cash
+  // account still shows with a zero balance. A tenant filter in the outer LEFT JOIN
+  // ON would let other tenants' lines on the same account code leak into the sum.
   const rows = await sql<{ code: string; name: string; bal: string }[]>`
-    SELECT c.code, c.name, COALESCE(SUM(l.debit_cents - l.credit_cents), 0) AS bal
+    SELECT c.code, c.name, COALESCE(t.bal, 0) AS bal
     FROM acct_chart c
-    LEFT JOIN acct_journal_lines l ON l.account_id = c.id
-    LEFT JOIN acct_journal_entries e ON e.id = l.entry_id
-      AND e.tenant_id = ${tenantId} AND e.status = 'posted' AND e.entry_date <= ${end}
+    LEFT JOIN (
+      SELECT l.account_id, SUM(l.debit_cents - l.credit_cents) AS bal
+      FROM acct_journal_lines l
+      JOIN acct_journal_entries e ON e.id = l.entry_id
+      WHERE e.tenant_id = ${tenantId} AND e.status = 'posted' AND e.entry_date <= ${end}
+      GROUP BY l.account_id
+    ) t ON t.account_id = c.id
     WHERE c.code IN ${sql(CASH_CODES)}
-    GROUP BY c.code, c.name
+    GROUP BY c.code, c.name, t.bal
     ORDER BY c.code
   `;
   const byAccount = rows.map((r) => ({
