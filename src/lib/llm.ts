@@ -51,10 +51,10 @@ export function spawnClaudeRunner(): ClaudeRunner {
         delete env.ANTHROPIC_API_KEY;
 
         // Pin an explicit model: claude -p defaults to the session's configured model
-        // (Fable), which can be unavailable and then exits 1 on every call. Default to
-        // Sonnet 4.6 (good categorization quality, fast enough at volume); override with
-        // LLM_MODEL. All ride the Max plan ($0) since ANTHROPIC_API_KEY is stripped above.
-        const model = process.env.LLM_MODEL || "claude-sonnet-4-6";
+        // (the SOTA Fable 5), which can be "currently unavailable" and then exits 1 on
+        // every call. Fallback ladder per Ariel: Fable 5 -> Opus 4.8 (NOT Sonnet/Haiku).
+        // Override with LLM_MODEL. All ride the Max plan ($0) since the API key is stripped.
+        const model = process.env.LLM_MODEL || "claude-opus-4-8";
 
         // stdin MUST be ignored: `claude -p` otherwise waits for piped stdin, warns
         // "no stdin data received in 3s", and exits 1 — failing every call. Ignoring
