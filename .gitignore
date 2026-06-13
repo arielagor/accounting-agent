@@ -1,0 +1,25 @@
+# Secrets — NEVER commit
+.env
+.env.*
+!.env.example
+*.pem
+*.p12
+*.key
+tokens/
+**/access-token*.json
+
+# Build output
+dist/
+*.tsbuildinfo
+
+# Dependencies
+node_modules/
+
+# Runtime
+logs/
+*.lock
+data/council/*.json
+
+# OS
+.DS_Store
+Thumbs.db
