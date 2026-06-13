@@ -232,7 +232,11 @@ export async function runClose(
 
   // ── archive / lock ──
   await advance("archive-lock");
-  const willLock = config.mode === "live" && verdict.status !== "FAILED";
+  // Never lock a period with zero activity: an empty close is not a real close, and
+  // locking it would shut out transactions that arrive later (e.g. after accounts are
+  // linked). Only a period that actually had transactions or postings gets locked.
+  const hadActivity = await periodHadActivity(sql, tenantId, period);
+  const willLock = config.mode === "live" && verdict.status !== "FAILED" && hadActivity;
   await writeCloseRecord(sql, tenantId, period, config, verdict, closePackage, willLock);
 
   // ── notify ──
@@ -566,6 +570,23 @@ async function writeCloseRecord(
       quarantine_value_cents = EXCLUDED.quarantine_value_cents, artifacts = EXCLUDED.artifacts,
       locked = acct_close.locked OR EXCLUDED.locked,
       locked_at = COALESCE(acct_close.locked_at, EXCLUDED.locked_at)`;
+}
+
+/** True if the period had any posted entry or any (non-superseded) raw transaction. */
+async function periodHadActivity(sql: Sql, tenantId: string, period: string): Promise<boolean> {
+  const m = /^(\d{4})-(\d{2})$/.exec(period);
+  if (!m) return false;
+  const start = `${m[1]}-${m[2]}-01`;
+  const lastDay = new Date(Date.UTC(Number(m[1]), Number(m[2]), 0)).getUTCDate();
+  const end = `${m[1]}-${m[2]}-${String(lastDay).padStart(2, "0")}`;
+  const rows = await sql<{ has: boolean }[]>`
+    SELECT (
+      EXISTS (SELECT 1 FROM acct_journal_entries e
+        WHERE e.tenant_id = ${tenantId} AND e.status = 'posted' AND e.entry_date BETWEEN ${start} AND ${end})
+      OR EXISTS (SELECT 1 FROM acct_transactions_raw r
+        WHERE r.tenant_id = ${tenantId} AND r.superseded_at IS NULL AND r.posted_date BETWEEN ${start} AND ${end})
+    ) AS has`;
+  return rows[0]?.has === true;
 }
 
 function buildDigest(

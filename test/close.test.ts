@@ -162,3 +162,14 @@ test("verify flags an undisposed transaction as FAILED (undisposed detection)", 
   assert.equal(verdict.status, "FAILED");
   assert.match(verdict.failureReason ?? "", /undisposed/);
 });
+
+test("an empty period in live mode is CLEAN but does NOT lock (no empty-period lock)", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  // 2026-03 has no seeded data for this tenant.
+  const result = await runClose(sql, TENANT, "2026-03", CONFIG, "close", { profile: PROFILE });
+  assert.equal(result.verdict.balanced, true);
+  assert.equal(result.locked, false, "an empty period must not be locked");
+  const locked = await sql<{ locked: boolean }[]>`
+    SELECT locked FROM acct_close WHERE tenant_id = ${TENANT} AND period = '2026-03'`;
+  if (locked.length > 0) assert.equal(locked[0]!.locked, false);
+});
