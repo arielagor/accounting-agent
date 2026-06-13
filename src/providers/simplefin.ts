@@ -115,13 +115,32 @@ function cursorToStartSeconds(cursor: string | null, nowSeconds: number): number
   return Math.trunc(parsed);
 }
 
+/**
+ * PURE: build the credential-safe SimpleFIN /accounts request. SimpleFIN access
+ * URLs embed HTTP basic-auth (https://user:pass@host/...), but Node's fetch REJECTS
+ * a URL that includes credentials — so we strip them into an Authorization header.
+ * Returns the credential-free URL and headers; the secret never appears in the URL
+ * (and so never in a fetch error or a log).
+ */
+export function buildSimpleFinRequest(
+  accessUrl: string,
+  startSec: number,
+): { url: string; headers: Record<string, string> } {
+  const trimmed = accessUrl.endsWith("/") ? accessUrl.slice(0, -1) : accessUrl;
+  const u = new URL(trimmed);
+  const headers: Record<string, string> = {};
+  if (u.username || u.password) {
+    const creds = `${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`;
+    headers.Authorization = `Basic ${Buffer.from(creds).toString("base64")}`;
+    u.username = "";
+    u.password = "";
+  }
+  const cleanBase = u.toString().replace(/\/$/, "");
+  return { url: `${cleanBase}/accounts?start-date=${startSec}&pending=1`, headers };
+}
+
 export class SimpleFinProvider implements AggregationProvider {
   readonly name = "simplefin";
-
-  /** Strip a single trailing slash so we don't build `//accounts`. */
-  private normalizeUrl(accessUrl: string): string {
-    return accessUrl.endsWith("/") ? accessUrl.slice(0, -1) : accessUrl;
-  }
 
   async listAccounts(accessToken: string): Promise<ProviderAccount[]> {
     const json = await this.fetchAccounts(accessToken, null);
@@ -149,13 +168,12 @@ export class SimpleFinProvider implements AggregationProvider {
     };
   }
 
-  /** Thin GET wrapper — the URL carries any basic-auth creds inline. READ-ONLY. */
+  /** Thin GET wrapper. Credentials ride an Authorization header, never the URL. READ-ONLY. */
   private async fetchAccounts(accessUrl: string, cursor: string | null): Promise<unknown> {
     const nowSeconds = Math.floor(Date.now() / 1000);
     const startSec = cursorToStartSeconds(cursor, nowSeconds);
-    const base = this.normalizeUrl(accessUrl);
-    const url = `${base}/accounts?start-date=${startSec}&pending=1`;
-    const res = await fetch(url, { method: "GET" });
+    const { url, headers } = buildSimpleFinRequest(accessUrl, startSec);
+    const res = await fetch(url, { method: "GET", headers });
     if (!res.ok) {
       throw new Error(`SimpleFIN /accounts HTTP ${res.status} ${res.statusText}`);
     }

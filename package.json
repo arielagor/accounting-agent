@@ -16,7 +16,8 @@
     "link": "node --import tsx bin/link.ts",
     "sync": "node --import tsx bin/sync.ts",
     "close": "node --import tsx bin/close-agent.ts",
-    "advisor": "node --import tsx bin/advisor.ts"
+    "advisor": "node --import tsx bin/advisor.ts",
+    "rekey": "node --import tsx bin/rekey.ts"
   },
   "dependencies": {
     "nodemailer": "^6.9.16",

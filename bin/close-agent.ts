@@ -116,8 +116,10 @@ async function main(): Promise<void> {
   const period = arg("--period") ?? (mode === "close" ? priorMonth(now) : thisMonth(now));
   const tenant = env.TENANT_ID ?? "ariel";
 
+  // --rung overrides CLOSE_MODE for a one-off run (e.g. a draft dry-run while .env=live).
+  const rungOverride = arg("--rung");
   const config: CloseConfig = {
-    mode: (env.CLOSE_MODE ?? "off").toLowerCase() as CloseConfig["mode"],
+    mode: (rungOverride ?? env.CLOSE_MODE ?? "off").toLowerCase() as CloseConfig["mode"],
     ajeAutoThresholdCents: Math.round(num(env, "AJE_AUTO_THRESHOLD", 250) * 100),
     largeTxnReviewCents: Math.round(num(env, "LARGE_TXN_REVIEW", 1000) * 100),
     confidenceThreshold: num(env, "CONFIDENCE_THRESHOLD", 0.85),
@@ -130,8 +132,10 @@ async function main(): Promise<void> {
     const taxYear = Number(period.slice(0, 4));
     const profile = await loadProfile(sql, tenant, taxYear, env);
 
+    // --no-llm runs rules-only (fast; unmatched txns quarantine instead of calling claude -p).
+    const noLlm = process.argv.includes("--no-llm");
     const llm: LlmCategorizer | undefined =
-      config.mode === "off" ? undefined : new ClaudeCategorizer(spawnClaudeRunner());
+      config.mode === "off" || noLlm ? undefined : new ClaudeCategorizer(spawnClaudeRunner());
     const stripe = env.STRIPE_SECRET_KEY ? createStripeReader(env.STRIPE_SECRET_KEY) : undefined;
 
     log(`close-agent: mode=${mode} period=${period} rung=${config.mode} tenant=${tenant}`);

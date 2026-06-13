@@ -35,14 +35,23 @@ export function parseEnvFile(path: string): Env {
   return out;
 }
 
-/** Merge a .env file over process.env (file wins where present). */
+/**
+ * Merge a .env file over process.env (file wins where present) AND hydrate
+ * process.env with the file's values. The hydration matters because some ported
+ * libraries (e.g. token-store) read process.env directly rather than the returned
+ * map; without it, a real INTEGRATION_ENC_KEY in .env would be silently ignored
+ * and secrets would be encrypted under the dev key. The .env is the source of truth.
+ */
 export function loadEnv(path: string): Env {
   const fromFile = parseEnvFile(path);
   const merged: Env = {};
   for (const [k, v] of Object.entries(process.env)) {
     if (typeof v === "string") merged[k] = v;
   }
-  for (const [k, v] of Object.entries(fromFile)) merged[k] = v;
+  for (const [k, v] of Object.entries(fromFile)) {
+    merged[k] = v;
+    process.env[k] = v; // hydrate so libs reading process.env directly see .env values
+  }
   return merged;
 }
 
