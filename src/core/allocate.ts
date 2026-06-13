@@ -91,6 +91,7 @@ interface RuleRow {
   id: number;
   name: string;
   match_account_code: string | null;
+  match_merchant_regex: string | null;
   method: AllocationMethod;
   basis_window: string;
 }
@@ -132,7 +133,7 @@ export async function allocate(
   const { start: priorStart, end: priorEnd } = priorPeriodBounds(period);
 
   const rules = await sql<RuleRow[]>`
-    SELECT id, name, match_account_code, method, basis_window
+    SELECT id, name, match_account_code, match_merchant_regex, method, basis_window
     FROM acct_allocation_rules
     WHERE enabled = true
     ORDER BY id
@@ -148,8 +149,15 @@ export async function allocate(
       continue;
     }
 
-    // 1) Shared total for the period on this account (net of any credits).
-    const total = await sharedTotalForAccount(sql, tenantId, account, start, end);
+    // 1) Shared total for the period on this account (net of any credits),
+    //    narrowed by the rule's merchant regex so two rules on the SAME account
+    //    (e.g. Netlify and Firebase both on 6160 Hosting) each claim only their own
+    //    cost and a shared line is never allocated twice. Postgres ~* is already
+    //    case-insensitive, so strip a leading (?i) inline flag from the seed regex.
+    const merchantRegex = rule.match_merchant_regex
+      ? rule.match_merchant_regex.replace(/^\(\?i\)/, "")
+      : null;
+    const total = await sharedTotalForAccount(sql, tenantId, account, start, end, merchantRegex);
     if (total === 0) {
       // Nothing booked to shared on this account this month — nothing to move.
       continue;
@@ -234,6 +242,7 @@ async function sharedTotalForAccount(
   accountCode: string,
   start: string,
   end: string,
+  merchantRegex: string | null = null,
 ): Promise<number> {
   const rows = await sql<{ net: string }[]>`
     SELECT COALESCE(SUM(l.debit_cents - l.credit_cents), 0) AS net
@@ -247,6 +256,7 @@ async function sharedTotalForAccount(
       AND e.entry_date BETWEEN ${start} AND ${end}
       AND c.code = ${accountCode}
       AND p.slug = ${SHARED_PROJECT}
+      ${merchantRegex ? sql`AND e.description ~* ${merchantRegex}` : sql``}
   `;
   return Number(rows[0]?.net ?? 0);
 }
