@@ -18,9 +18,11 @@
     "close": "node --import tsx bin/close-agent.ts",
     "advisor": "node --import tsx bin/advisor.ts",
     "rekey": "node --import tsx bin/rekey.ts",
-    "dashboard": "node --import tsx bin/dashboard.ts"
+    "dashboard": "node --import tsx bin/dashboard.ts",
+    "export-sheet": "node --import tsx bin/export-sheet.ts"
   },
   "dependencies": {
+    "exceljs": "^4.4.0",
     "nodemailer": "^6.9.16",
     "postgres": "^3.4.5"
   },

@@ -6,6 +6,7 @@
 import type { Sql } from "../core/db.js";
 import type { EntityProfile, EntityType, FilingStatus } from "../core/types.js";
 import { assembleClosePackage, type ClosePackage } from "../core/reports.js";
+import { periodBounds } from "../core/ledger.js";
 
 export interface QuarantineItem {
   sourceTxnId: string;
@@ -50,6 +51,7 @@ export async function getDashboardData(
   generatedAt: string,
 ): Promise<DashboardData> {
   const taxYear = Number(period.slice(0, 4));
+  const { start: periodStart, end: periodEnd } = periodBounds(period);
   const profile = await loadProfile(sql, tenant, taxYear);
   const closePackage = await assembleClosePackage(sql, tenant, period, profile);
 
@@ -71,7 +73,7 @@ export async function getDashboardData(
     LEFT JOIN acct_source_accounts sa ON sa.id = r.source_account_id
     WHERE rq.status = 'open'
       AND (r.tenant_id = ${tenant} OR r.tenant_id IS NULL)
-      AND (r.posted_date IS NULL OR r.posted_date BETWEEN ${period + "-01"} AND ${period + "-31"})
+      AND (r.posted_date IS NULL OR r.posted_date BETWEEN ${periodStart} AND ${periodEnd})
     ORDER BY ABS(COALESCE(r.amount_cents, 0)) DESC`;
 
   const quarantine: QuarantineItem[] = qRows.map((q) => ({
