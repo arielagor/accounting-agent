@@ -77,6 +77,9 @@ interface RawForClose {
 
 const CONFIDENCE_AUTOPOST = 0.9;
 
+/** Card-payment / transfer descriptions: a credit-account inflow matching this is a payment, not an expense. */
+const PAYMENT_RE = /payment|autopay|thank ?you|online pmt|pymt|auto-?pmt/i;
+
 export async function runClose(
   sql: Sql,
   tenantId: string,
@@ -141,6 +144,25 @@ export async function runClose(
     if (!t.ledgerCode) {
       // Source account not mapped to a ledger account — cannot post safely; escalate.
       await quarantineUnmapped(sql, t);
+      continue;
+    }
+    // A PAYMENT-type inflow on a credit-card account is a card payment (a transfer),
+    // never an expense. Book Dr card-liability / Cr 9100 clearing so it reduces the
+    // card balance and parks the offset for the (possibly unsynced) bank leg. Without
+    // this, a card autopay would post as a huge phantom personal expense. (Refund-type
+    // inflows fall through to categorize — Hank books those as contra-expense.)
+    if (t.amountCents > 0 && t.accountType === "credit" && PAYMENT_RE.test(t.description)) {
+      await postEntry(sql, tenantId, {
+        entryDate: t.postedDate ?? `${period}-01`,
+        description: t.description || "Card payment",
+        source: "bank",
+        sourceTxnId: `raw:${t.id}`,
+        idempotencyKey: `raw:${t.id}`,
+        lines: [
+          { accountCode: t.ledgerCode, debitCents: t.amountCents, creditCents: 0, memo: "card payment" },
+          { accountCode: "9100", debitCents: 0, creditCents: t.amountCents, memo: "transfer clearing" },
+        ],
+      });
       continue;
     }
     const input: CategorizationInput = {

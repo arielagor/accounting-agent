@@ -353,7 +353,18 @@ export async function categorize(
       .some((r) => regexRuleApplies(r, input) && r.needsSplit);
 
   if (opts.llm && !deterministicWillPost && !deterministicNeedsSplit) {
-    llmProposal = await opts.llm.categorize(input, { chart: [], projects: [] });
+    // The LLM MUST receive the chart of accounts + projects, or it cannot pick a
+    // valid code and (correctly) refuses — quarantining everything. Load them here.
+    const [chartRows, projectRows] = await Promise.all([
+      sql<{ code: string; name: string; type: string }[]>`
+        SELECT code, name, type FROM acct_chart WHERE is_active ORDER BY code`,
+      sql<{ slug: string; name: string }[]>`
+        SELECT slug, name FROM acct_projects WHERE status = 'active' ORDER BY slug`,
+    ]);
+    llmProposal = await opts.llm.categorize(input, {
+      chart: chartRows.map((c) => ({ code: c.code, name: c.name, type: c.type as import("./types.js").AccountType })),
+      projects: projectRows.map((p) => ({ slug: p.slug, name: p.name })),
+    });
     // Audit trail: every LLM proposal is logged regardless of whether it posts.
     await sql`
       INSERT INTO acct_llm_decisions
