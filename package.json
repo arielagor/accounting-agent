@@ -20,7 +20,10 @@
     "rekey": "node --import tsx bin/rekey.ts",
     "dashboard": "node --import tsx bin/dashboard.ts",
     "export-sheet": "node --import tsx bin/export-sheet.ts",
-    "send-digest": "node --import tsx bin/send-digest.ts"
+    "export-year": "node --import tsx bin/export-year.ts",
+    "send-digest": "node --import tsx bin/send-digest.ts",
+    "google-consent": "node --import tsx bin/google-consent.ts",
+    "push-gsheet": "node --import tsx bin/push-gsheet.ts"
   },
   "dependencies": {
     "exceljs": "^4.4.0",

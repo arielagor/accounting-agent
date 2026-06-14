@@ -29,3 +29,7 @@ scripts/task-*.cmd
 
 # Generated financial exports (contain account data)
 exports/
+
+# Live Google Sheet: OAuth token + spreadsheet id (secret/local)
+.google-token.json
+.gsheet.json
