@@ -8,6 +8,7 @@
  * Usage: node --import tsx bin/dashboard.ts   (then open http://127.0.0.1:4242)
  */
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { timingSafeEqual } from "node:crypto";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadEnv } from "../src/lib/env.js";
@@ -30,6 +31,23 @@ const port = Number(env.DASHBOARD_PORT ?? 4242);
 // are financial + the queue is writable, so do NOT expose it unauthenticated).
 const host = env.DASHBOARD_HOST ?? "127.0.0.1";
 const token = env.DASHBOARD_TOKEN ?? "";
+
+// Fail-closed: never expose beyond localhost without a token.
+if (host !== "127.0.0.1" && host !== "localhost" && !token) {
+  error(`refusing to bind ${host} without DASHBOARD_TOKEN — set a token or bind 127.0.0.1`);
+  process.exit(1);
+}
+
+/** Timing-safe token check. The token travels in a header, never the URL. */
+function tokenOk(provided: string | string[] | undefined): boolean {
+  if (!token) return true; // localhost-only mode, no token configured
+  const got = Array.isArray(provided) ? provided[0] : provided;
+  if (!got) return false;
+  const a = Buffer.from(got);
+  const b = Buffer.from(token);
+  return a.length === b.length && timingSafeEqual(a, b);
+}
+
 const sql = openSql(url);
 
 function json(res: ServerResponse, code: number, body: unknown): void {
@@ -60,10 +78,11 @@ async function latestPeriod(): Promise<string> {
 const server = createServer(async (req, res) => {
   try {
     const u = new URL(req.url ?? "/", `http://localhost:${port}`);
-    // Token gate (only when DASHBOARD_TOKEN is set, i.e. when exposed beyond localhost).
-    if (token && u.searchParams.get("token") !== token && req.headers["x-dash-token"] !== token) {
+    // Only /api/* is gated, and ONLY by header (a URL token leaks into logs/history/
+    // Referer). The HTML shell carries no data; it bootstraps the token client-side.
+    if (u.pathname.startsWith("/api/") && !tokenOk(req.headers["x-dash-token"])) {
       res.writeHead(401, { "content-type": "text/plain" });
-      res.end("unauthorized — append ?token=… to the URL");
+      res.end("unauthorized");
       return;
     }
     if (req.method === "GET" && u.pathname === "/") {
@@ -147,14 +166,22 @@ body.mobile .qrow select{max-width:60vw}
 <div class="wrap" id="wrap"></div>
 <script>
 const $=s=>document.querySelector(s);
-const TK=new URLSearchParams(location.search).get('token')||'';
-const api=p=>p+(TK?(p.includes('?')?'&':'?')+'token='+encodeURIComponent(TK):'');
+// Token bootstrap: read it from the URL #fragment (never sent to the server, so it
+// stays out of logs/history/Referer), stash in sessionStorage, strip the fragment.
+// Thereafter it rides the x-dash-token HEADER on every API call, never the URL.
+let TK='';(function(){
+  const h=new URLSearchParams((location.hash||'').replace(/^#/,'')).get('token');
+  if(h){TK=h;try{sessionStorage.setItem('acct_tk',h)}catch(e){}history.replaceState(null,'',location.pathname);}
+  else{try{TK=sessionStorage.getItem('acct_tk')||''}catch(e){}}
+  if(!TK){TK=(prompt('Dashboard access token:')||'').trim();try{sessionStorage.setItem('acct_tk',TK)}catch(e){}}
+})();
+const H=()=>({'x-dash-token':TK});
 function applyMobile(on){document.body.classList.toggle('mobile',on);const b=$('#mtoggle');if(b)b.classList.toggle('on',on);try{localStorage.setItem('acct_mobile',on?'1':'0')}catch(e){}}
 function toggleMobile(){applyMobile(!document.body.classList.contains('mobile'))}
 const usd=c=>{const n=(c||0)/100;return (n<0?'-$':'$')+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
 let DATA=null;
-async function loadPeriods(){const r=await (await fetch(api('/api/periods'))).json();const sel=$('#period');sel.innerHTML='';(r.periods||[]).forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o)});sel.onchange=()=>load(sel.value);return r.periods&&r.periods[0]}
-async function load(period){const d=await (await fetch(api('/api/data?period='+(period||''))) ).json();DATA=d;render(d)}
+async function loadPeriods(){const r=await (await fetch('/api/periods',{headers:H()})).json();const sel=$('#period');sel.innerHTML='';(r.periods||[]).forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o)});sel.onchange=()=>load(sel.value);return r.periods&&r.periods[0]}
+async function load(period){const d=await (await fetch('/api/data?period='+(period||''),{headers:H()}) ).json();DATA=d;render(d)}
 function row(label,val,cls){return '<tr><td>'+label+'</td><td class="r '+(cls||'')+'">'+val+'</td></tr>'}
 function render(d){
  const v=d.closePackage; const ver=v.tieOut===false?'<span class="badge warn">TIE-OUT?</span>':'<span class="badge">'+(d.closeStatus||'DRAFT')+(d.locked?' · LOCKED':'')+'</span>';
@@ -182,7 +209,7 @@ function render(d){
 }
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 async function resolve(btn){const tr=btn.closest('tr');const id=tr.dataset.id;const code=tr.querySelector('select').value;
- btn.disabled=true;const r=await (await fetch(api('/api/resolve'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sourceTxnId:id,accountCode:code})})).json();
+ btn.disabled=true;const r=await (await fetch('/api/resolve',{method:'POST',headers:{'content-type':'application/json','x-dash-token':TK},body:JSON.stringify({sourceTxnId:id,accountCode:code})})).json();
  if(r.ok){tr.querySelector('.ok').textContent='✓ posted';setTimeout(()=>tr.remove(),600)}else{btn.disabled=false;tr.querySelector('.ok').textContent='✗ '+(r.reason||r.error||'failed')}}
 (async()=>{const sv=localStorage.getItem('acct_mobile');applyMobile(sv!==null?sv==='1':(window.innerWidth<=640));const first=await loadPeriods();await load(first)})();
 </script></body></html>`;
