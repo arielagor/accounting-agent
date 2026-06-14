@@ -25,6 +25,11 @@ if (!url) {
 }
 const tenant = env.TENANT_ID ?? "ariel";
 const port = Number(env.DASHBOARD_PORT ?? 4242);
+// Bind to 127.0.0.1 by default. Set DASHBOARD_HOST=0.0.0.0 to reach it from a phone
+// over Tailscale/LAN — in which case DASHBOARD_TOKEN gates every request (the books
+// are financial + the queue is writable, so do NOT expose it unauthenticated).
+const host = env.DASHBOARD_HOST ?? "127.0.0.1";
+const token = env.DASHBOARD_TOKEN ?? "";
 const sql = openSql(url);
 
 function json(res: ServerResponse, code: number, body: unknown): void {
@@ -55,6 +60,12 @@ async function latestPeriod(): Promise<string> {
 const server = createServer(async (req, res) => {
   try {
     const u = new URL(req.url ?? "/", `http://localhost:${port}`);
+    // Token gate (only when DASHBOARD_TOKEN is set, i.e. when exposed beyond localhost).
+    if (token && u.searchParams.get("token") !== token && req.headers["x-dash-token"] !== token) {
+      res.writeHead(401, { "content-type": "text/plain" });
+      res.end("unauthorized — append ?token=… to the URL");
+      return;
+    }
     if (req.method === "GET" && u.pathname === "/") {
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(PAGE);
@@ -95,11 +106,11 @@ const server = createServer(async (req, res) => {
   }
 });
 
-server.listen(port, "127.0.0.1", () => {
-  log(`Accounting dashboard -> http://127.0.0.1:${port}  (tenant=${tenant})`);
+server.listen(port, host, () => {
+  log(`Accounting dashboard -> http://${host}:${port}  (tenant=${tenant}${token ? ", token required" : ""})`);
 });
 
-const PAGE = `<!doctype html><html><head><meta charset="utf-8"><title>Accounting</title>
+const PAGE = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover"><title>Accounting</title>
 <style>
 :root{--bg:#0f1115;--card:#181b22;--ink:#e8eaed;--mut:#9aa0aa;--line:#262b35;--pos:#4ade80;--neg:#f87171;--accent:#7c9cff}
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif}
@@ -116,15 +127,34 @@ th{color:var(--mut);font-weight:500}.r{text-align:right;font-variant-numeric:tab
 .badge{display:inline-block;padding:2px 8px;border-radius:99px;font-size:12px;background:#1f3d2a;color:var(--pos)}
 .badge.warn{background:#3d3320;color:#fbbf24}.muted{color:var(--mut)}
 .qrow select{max-width:280px}.ok{color:var(--pos);font-size:12px}
+/* Mobile: auto on narrow screens, or forced by body.mobile (the toggle). Single
+   column, bigger touch targets, horizontally-scrollable tables. */
+@media (max-width:640px){
+  .wrap{grid-template-columns:1fr;padding:14px;gap:14px}
+  header{padding:12px 14px;gap:10px}
+  .card{overflow-x:auto}.kpi{font-size:22px}
+  select,button{padding:9px 12px;font-size:15px}
+  td,th{padding:8px 4px}
+}
+body.mobile .wrap{grid-template-columns:1fr;padding:14px;gap:14px}
+body.mobile .card{overflow-x:auto}
+body.mobile select,body.mobile button{padding:10px 14px;font-size:15px}
+body.mobile td,body.mobile th{padding:9px 4px;font-size:14px}
+body.mobile .qrow select{max-width:60vw}
+#mtoggle.on{border-color:var(--accent);color:var(--accent)}
 </style></head><body>
-<header><h1>Accounting</h1><select id="period"></select><span id="verdict"></span><span class="sub" id="gen"></span></header>
+<header><h1>Accounting</h1><select id="period"></select><span id="verdict"></span><span class="sub" id="gen"></span><button id="mtoggle" onclick="toggleMobile()" title="Mobile-friendly layout">Mobile</button></header>
 <div class="wrap" id="wrap"></div>
 <script>
 const $=s=>document.querySelector(s);
+const TK=new URLSearchParams(location.search).get('token')||'';
+const api=p=>p+(TK?(p.includes('?')?'&':'?')+'token='+encodeURIComponent(TK):'');
+function applyMobile(on){document.body.classList.toggle('mobile',on);const b=$('#mtoggle');if(b)b.classList.toggle('on',on);try{localStorage.setItem('acct_mobile',on?'1':'0')}catch(e){}}
+function toggleMobile(){applyMobile(!document.body.classList.contains('mobile'))}
 const usd=c=>{const n=(c||0)/100;return (n<0?'-$':'$')+Math.abs(n).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2})};
 let DATA=null;
-async function loadPeriods(){const r=await (await fetch('/api/periods')).json();const sel=$('#period');sel.innerHTML='';(r.periods||[]).forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o)});sel.onchange=()=>load(sel.value);return r.periods&&r.periods[0]}
-async function load(period){const d=await (await fetch('/api/data?period='+(period||'')) ).json();DATA=d;render(d)}
+async function loadPeriods(){const r=await (await fetch(api('/api/periods'))).json();const sel=$('#period');sel.innerHTML='';(r.periods||[]).forEach(p=>{const o=document.createElement('option');o.value=p;o.textContent=p;sel.appendChild(o)});sel.onchange=()=>load(sel.value);return r.periods&&r.periods[0]}
+async function load(period){const d=await (await fetch(api('/api/data?period='+(period||''))) ).json();DATA=d;render(d)}
 function row(label,val,cls){return '<tr><td>'+label+'</td><td class="r '+(cls||'')+'">'+val+'</td></tr>'}
 function render(d){
  const v=d.closePackage; const ver=v.tieOut===false?'<span class="badge warn">TIE-OUT?</span>':'<span class="badge">'+(d.closeStatus||'DRAFT')+(d.locked?' · LOCKED':'')+'</span>';
@@ -152,7 +182,7 @@ function render(d){
 }
 function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 async function resolve(btn){const tr=btn.closest('tr');const id=tr.dataset.id;const code=tr.querySelector('select').value;
- btn.disabled=true;const r=await (await fetch('/api/resolve',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sourceTxnId:id,accountCode:code})})).json();
+ btn.disabled=true;const r=await (await fetch(api('/api/resolve'),{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({sourceTxnId:id,accountCode:code})})).json();
  if(r.ok){tr.querySelector('.ok').textContent='✓ posted';setTimeout(()=>tr.remove(),600)}else{btn.disabled=false;tr.querySelector('.ok').textContent='✗ '+(r.reason||r.error||'failed')}}
-(async()=>{const first=await loadPeriods();await load(first)})();
+(async()=>{const sv=localStorage.getItem('acct_mobile');applyMobile(sv!==null?sv==='1':(window.innerWidth<=640));const first=await loadPeriods();await load(first)})();
 </script></body></html>`;
