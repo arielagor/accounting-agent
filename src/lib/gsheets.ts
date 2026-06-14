@@ -38,6 +38,28 @@ export function spreadsheetUrl(id: string): string {
   return `https://docs.google.com/spreadsheets/d/${id}/edit`;
 }
 
+/**
+ * Share the Sheet with a user (so an account other than the one that created it can
+ * open it). Uses the Drive permissions API — allowed under drive.file for files the
+ * app created. Idempotent enough: a duplicate grant is harmless.
+ */
+export async function shareSheet(
+  token: string,
+  spreadsheetId: string,
+  email: string,
+  role: "writer" | "reader" = "writer",
+): Promise<void> {
+  const res = await fetch(
+    `https://www.googleapis.com/drive/v3/files/${spreadsheetId}/permissions?sendNotificationEmail=false&supportsAllDrives=true`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ role, type: "user", emailAddress: email }),
+    },
+  );
+  if (!res.ok) throw new Error(`Drive share -> ${res.status} ${await res.text()}`);
+}
+
 /** Create missing tabs, drop the default empty "Sheet1", then clear+write each tab. */
 export async function writeTabs(token: string, spreadsheetId: string, tabs: SheetTab[]): Promise<void> {
   const meta = await call(token, `${API}/${spreadsheetId}?fields=sheets.properties`, "GET");

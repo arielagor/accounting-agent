@@ -17,6 +17,7 @@ import { runClose } from "../src/core/close.js";
 import { createStripeReader } from "../src/lib/stripe.js";
 import { spawnClaudeRunner, ClaudeCategorizer } from "../src/lib/llm.js";
 import { buildNodemailerTransport, sendDigest } from "../src/lib/digest.js";
+import { syncLiveSheet } from "../src/lib/gsheet-sync.js";
 import type {
   CloseConfig,
   CloseRunMode,
@@ -170,6 +171,14 @@ async function main(): Promise<void> {
       } else {
         warn("SMTP not configured; digest not sent (verdict stands).");
       }
+    }
+
+    // Refresh the live Google Sheet if connected (best-effort; never fails the close).
+    try {
+      const sheetUrl = await syncLiveSheet(sql, tenant, String(taxYear));
+      if (sheetUrl) log(`live Sheet refreshed: ${sheetUrl}`);
+    } catch (e) {
+      warn("live Sheet refresh failed:", e instanceof Error ? e.message : String(e));
     }
   } catch (e) {
     error("close-agent crashed:", e instanceof Error ? e.message : String(e));
