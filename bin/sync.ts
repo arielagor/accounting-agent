@@ -118,6 +118,11 @@ async function main(): Promise<void> {
     error("ACCT_DB_URL not set");
     process.exit(1);
   }
+  // --since YYYY-MM-DD backfills from that date (overrides the stored cursor this run).
+  const sinceArg = arg("--since");
+  const sinceCursor = sinceArg
+    ? String(Math.floor(new Date(sinceArg + "T00:00:00Z").getTime() / 1000))
+    : null;
   const lock = acquireLock(join(root, "logs", "sync.lock"), 30 * 60 * 1000);
   if (!lock.acquired) {
     log("another sync holds the lock; exiting");
@@ -146,7 +151,7 @@ async function main(): Promise<void> {
       try {
         const acctMap = await upsertAccounts(sql, conn, accessToken);
         const provider = getProvider(conn.provider as ProviderName);
-        let cursor = conn.sync_cursor;
+        let cursor = sinceCursor ?? conn.sync_cursor;
         for (;;) {
           const page = await provider.syncTransactions(accessToken, cursor);
           for (const t of [...page.added, ...page.modified]) {
