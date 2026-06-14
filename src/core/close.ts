@@ -69,6 +69,9 @@ interface RawForClose {
   sourceAccountId: number;
   ledgerCode: string | null;
   accountType: string;
+  /** The CHART type of the ledger account ('asset' bank, 'liability' card, ...). The
+   * SimpleFIN source `accountType` is the bank name, so this is the reliable signal. */
+  ledgerType: string | null;
   amountCents: number;
   postedDate: string | null;
   description: string;
@@ -151,7 +154,7 @@ export async function runClose(
     // card balance and parks the offset for the (possibly unsynced) bank leg. Without
     // this, a card autopay would post as a huge phantom personal expense. (Refund-type
     // inflows fall through to categorize — Hank books those as contra-expense.)
-    if (t.amountCents > 0 && t.accountType === "credit" && PAYMENT_RE.test(t.description)) {
+    if (t.amountCents > 0 && t.ledgerType === "liability" && PAYMENT_RE.test(t.description)) {
       await postEntry(sql, tenantId, {
         entryDate: t.postedDate ?? `${period}-01`,
         description: t.description || "Card payment",
@@ -293,6 +296,7 @@ async function loadUndisposed(sql: Sql, tenantId: string, period: string): Promi
       source_account_id: number;
       ledger_code: string | null;
       account_type: string | null;
+      ledger_type: string | null;
       amount_cents: string;
       posted_date: string | null;
       description_raw: string | null;
@@ -300,10 +304,11 @@ async function loadUndisposed(sql: Sql, tenantId: string, period: string): Promi
     }[]
   >`
     SELECT r.id, r.source_account_id, sa.ledger_account_code AS ledger_code,
-           sa.type AS account_type, r.amount_cents, r.posted_date,
+           sa.type AS account_type, c.type AS ledger_type, r.amount_cents, r.posted_date,
            r.description_raw, r.merchant_name
     FROM acct_transactions_raw r
     JOIN acct_source_accounts sa ON sa.id = r.source_account_id
+    LEFT JOIN acct_chart c ON c.code = sa.ledger_account_code
     WHERE r.tenant_id = ${tenantId} AND r.superseded_at IS NULL AND r.pending = false
       AND r.posted_date BETWEEN ${start} AND ${end}
       AND NOT EXISTS (SELECT 1 FROM acct_journal_entries e
@@ -315,6 +320,7 @@ async function loadUndisposed(sql: Sql, tenantId: string, period: string): Promi
     sourceAccountId: r.source_account_id,
     ledgerCode: r.ledger_code,
     accountType: r.account_type ?? "depository",
+    ledgerType: r.ledger_type,
     amountCents: Number(r.amount_cents),
     postedDate: r.posted_date,
     description: r.description_raw ?? "",

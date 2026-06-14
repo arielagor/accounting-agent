@@ -19,16 +19,19 @@
     "advisor": "node --import tsx bin/advisor.ts",
     "rekey": "node --import tsx bin/rekey.ts",
     "dashboard": "node --import tsx bin/dashboard.ts",
-    "export-sheet": "node --import tsx bin/export-sheet.ts"
+    "export-sheet": "node --import tsx bin/export-sheet.ts",
+    "send-digest": "node --import tsx bin/send-digest.ts"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
     "nodemailer": "^6.9.16",
+    "pdfkit": "^0.19.1",
     "postgres": "^3.4.5"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/nodemailer": "^6.4.17",
+    "@types/pdfkit": "^0.17.6",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

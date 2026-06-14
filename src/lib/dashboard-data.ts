@@ -67,7 +67,7 @@ export async function getDashboardData(
     }[]
   >`
     SELECT rq.source_txn_id, rq.reason, r.merchant_name AS merchant, r.description_raw,
-           r.amount_cents, r.posted_date, sa.ledger_account_code AS account
+           r.amount_cents, to_char(r.posted_date, 'YYYY-MM-DD') AS posted_date, sa.ledger_account_code AS account
     FROM acct_review_queue rq
     LEFT JOIN acct_transactions_raw r ON ('raw:' || r.id) = rq.source_txn_id
     LEFT JOIN acct_source_accounts sa ON sa.id = r.source_account_id
