@@ -297,6 +297,175 @@ export function buildSplitChargeEntry(args: SplitChargeArgs): NewJournalEntry {
   };
 }
 
+// ─── SMB: AR invoices, AP bills, payroll ────────────────────────────────────────
+export interface InvoiceRevenueLine {
+  revenueAccountCode: string;
+  amountCents: Cents; // absolute, > 0
+  projectSlug?: string | null;
+  memo?: string;
+}
+export interface InvoiceArgs {
+  entryDate: string;
+  idempotencyKey: string;
+  sourceTxnId?: string | null;
+  revenueLines: InvoiceRevenueLine[];
+  taxCents?: Cents; // sales tax collected (credited to sales-tax payable)
+  arAccountCode?: string; // default 1200 Accounts Receivable
+  salesTaxAccountCode?: string; // default 2100 Sales Tax Payable
+  memo?: string;
+}
+
+/**
+ * Issue an invoice (accrual revenue recognition).
+ *   Dr 1200 Accounts Receivable (subtotal + tax)
+ *   Cr revenue account(s) (subtotal, split per line)
+ *   Cr 2100 Sales Tax Payable (tax, if any)
+ */
+export function buildInvoiceEntry(args: InvoiceArgs): NewJournalEntry {
+  const tax = Math.abs(args.taxCents ?? 0);
+  const subtotal = args.revenueLines.reduce((a, l) => a + Math.abs(l.amountCents), 0);
+  const total = subtotal + tax;
+  const lines: NewJournalLine[] = [
+    { accountCode: args.arAccountCode ?? "1200", debitCents: total, creditCents: 0, memo: args.memo },
+  ];
+  for (const r of args.revenueLines) {
+    lines.push({
+      accountCode: r.revenueAccountCode,
+      projectSlug: r.projectSlug ?? null,
+      debitCents: 0,
+      creditCents: Math.abs(r.amountCents),
+      memo: r.memo ?? args.memo,
+    });
+  }
+  if (tax > 0) {
+    lines.push({ accountCode: args.salesTaxAccountCode ?? "2100", debitCents: 0, creditCents: tax, memo: "sales tax collected" });
+  }
+  return {
+    entryDate: args.entryDate,
+    description: args.memo ?? "Invoice issued",
+    source: "manual",
+    sourceTxnId: args.sourceTxnId ?? null,
+    idempotencyKey: args.idempotencyKey,
+    lines,
+  };
+}
+
+export interface BillExpenseLine {
+  expenseAccountCode: string;
+  amountCents: Cents; // absolute, > 0
+  projectSlug?: string | null;
+  businessPct?: number;
+  memo?: string;
+}
+export interface BillArgs {
+  entryDate: string;
+  idempotencyKey: string;
+  sourceTxnId?: string | null;
+  expenseLines: BillExpenseLine[];
+  apAccountCode?: string; // default 2050 Accounts Payable
+  memo?: string;
+}
+
+/**
+ * Record a vendor bill (accrual; the obligation, not the payment).
+ *   Dr expense account(s) (business portion) [+ Dr 9500 Personal (personal portion)]
+ *   Cr 2050 Accounts Payable (total)
+ */
+export function buildBillEntry(args: BillArgs): NewJournalEntry {
+  const lines: NewJournalLine[] = [];
+  let total = 0;
+  for (const c of args.expenseLines) {
+    const amount = Math.abs(c.amountCents);
+    total += amount;
+    const pct = clampPct(c.businessPct ?? 100);
+    const [businessCents, personalCents] = allocateCents(amount, [pct, 100 - pct]);
+    if (businessCents! > 0) {
+      lines.push({
+        accountCode: c.expenseAccountCode,
+        projectSlug: c.projectSlug ?? null,
+        debitCents: businessCents!,
+        creditCents: 0,
+        businessPct: pct,
+        memo: c.memo ?? args.memo,
+      });
+    }
+    if (personalCents! > 0) {
+      lines.push({
+        accountCode: "9500",
+        projectSlug: "personal",
+        debitCents: personalCents!,
+        creditCents: 0,
+        businessPct: 0,
+        memo: c.memo ? `${c.memo} (personal portion)` : "personal portion",
+      });
+    }
+  }
+  lines.push({ accountCode: args.apAccountCode ?? "2050", debitCents: 0, creditCents: total, memo: args.memo });
+  return {
+    entryDate: args.entryDate,
+    description: args.memo ?? "Vendor bill",
+    source: "manual",
+    sourceTxnId: args.sourceTxnId ?? null,
+    idempotencyKey: args.idempotencyKey,
+    lines,
+  };
+}
+
+export interface PayrollArgs {
+  entryDate: string;
+  idempotencyKey: string;
+  grossCents: Cents; // total gross wages
+  employeeWithholdingCents: Cents; // income + employee FICA withheld
+  employerTaxCents: Cents; // employer FICA/FUTA/SUTA
+  cashAccountCode?: string; // default 1010 — net pay disbursed
+  wagesAccountCode?: string; // default 6210
+  employerTaxExpenseCode?: string; // default 6220
+  withholdingPayableCode?: string; // default 2110
+  employerTaxPayableCode?: string; // default 2120
+  memo?: string;
+}
+
+/**
+ * Post a payroll run. Records the expense + the liabilities owed to tax authorities;
+ * net pay reduces cash. (The agent RECORDS the run — it never actually remits.)
+ *   Dr 6210 Wages (gross)
+ *   Dr 6220 Employer Payroll Taxes (employer portion)
+ *   Cr 2110 Withholdings Payable (employee withholding)
+ *   Cr 2120 Employer Taxes Payable (employer portion)
+ *   Cr 1010 Cash (net = gross - withholding)
+ * Balances: debits (gross + employerTax) = credits (withholding + employerTax + net).
+ */
+export function buildPayrollEntry(args: PayrollArgs): NewJournalEntry {
+  const gross = Math.abs(args.grossCents);
+  const withholding = Math.abs(args.employeeWithholdingCents);
+  const employerTax = Math.abs(args.employerTaxCents);
+  const net = gross - withholding;
+  if (net < 0) throw new Error(`payroll withholding (${withholding}) exceeds gross (${gross})`);
+  const lines: NewJournalLine[] = [
+    { accountCode: args.wagesAccountCode ?? "6210", debitCents: gross, creditCents: 0, memo: args.memo },
+  ];
+  if (employerTax > 0) {
+    lines.push({ accountCode: args.employerTaxExpenseCode ?? "6220", debitCents: employerTax, creditCents: 0, memo: "employer payroll taxes" });
+  }
+  if (withholding > 0) {
+    lines.push({ accountCode: args.withholdingPayableCode ?? "2110", debitCents: 0, creditCents: withholding, memo: "employee withholdings payable" });
+  }
+  if (employerTax > 0) {
+    lines.push({ accountCode: args.employerTaxPayableCode ?? "2120", debitCents: 0, creditCents: employerTax, memo: "employer taxes payable" });
+  }
+  if (net > 0) {
+    lines.push({ accountCode: args.cashAccountCode ?? "1010", debitCents: 0, creditCents: net, memo: "net pay" });
+  }
+  return {
+    entryDate: args.entryDate,
+    description: args.memo ?? "Payroll run",
+    source: "manual",
+    sourceTxnId: null,
+    idempotencyKey: args.idempotencyKey,
+    lines,
+  };
+}
+
 function clampPct(p: number): number {
   if (!Number.isFinite(p)) return 100;
   return Math.max(0, Math.min(100, p));
