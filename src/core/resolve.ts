@@ -6,6 +6,7 @@
  * always (a) lands in the ledger and (b) compounds into the rule set.
  */
 import type { Sql } from "./db.js";
+import type { CreatedBy } from "./types.js";
 import { postEntry } from "./ledger.js";
 import { buildExpenseEntry, buildRevenueEntry } from "./posting.js";
 import { normalizeMerchant } from "./categorize.js";
@@ -28,6 +29,7 @@ export async function applyManualCategorization(
   accountCode: string,
   businessPct = 100,
   learn = true,
+  createdBy: CreatedBy = "human",
 ): Promise<ManualResult> {
   const m = /^raw:(\d+)$/.exec(sourceTxnId);
   if (!m) return { posted: false, alreadyPosted: false, reason: "bad source txn id" };
@@ -88,18 +90,21 @@ export async function applyManualCategorization(
           businessPct,
           memo,
         });
-  entry.createdBy = "human";
+  entry.createdBy = createdBy;
   await postEntry(sql, tenantId, entry);
   await resolveReview(sql, sourceTxnId);
 
   if (learn && t.merchant_name) {
+    // A human confirmation is authoritative ('human'); an auditor/LLM auto-resolution
+    // learns as 'llm_accepted' so its provenance is honest in the rule set.
+    const learnedFrom = createdBy === "human" ? "human" : "llm_accepted";
     const key = normalizeMerchant(t.merchant_name);
     await sql`
       INSERT INTO acct_merchant_rules (merchant_key, account_code, business_pct, learned_from)
-      VALUES (${key}, ${accountCode}, ${businessPct}, 'human')
+      VALUES (${key}, ${accountCode}, ${businessPct}, ${learnedFrom})
       ON CONFLICT (merchant_key) DO UPDATE SET
         account_code = EXCLUDED.account_code, business_pct = EXCLUDED.business_pct,
-        learned_from = 'human', last_confirmed_at = now(), times_seen = acct_merchant_rules.times_seen + 1`;
+        learned_from = EXCLUDED.learned_from, last_confirmed_at = now(), times_seen = acct_merchant_rules.times_seen + 1`;
   }
 
   return { posted: true, alreadyPosted: false };

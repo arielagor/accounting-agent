@@ -372,6 +372,51 @@ export interface DocumentExtractor {
   extract(input: DocumentExtractInput, context: LlmCategorizeContext): Promise<ExtractedDocument>;
 }
 
+// ─── Autonomous auditor ─────────────────────────────────────────────────────────
+/**
+ * A council deliberation result for one ambiguous transaction. The council either
+ * resolves it (a confident account choice), surfaces a hard human-gate (aggressive
+ * deduction / entity change / money movement — never auto-acted on), or asks for
+ * access to data it needs (a research agent's structured request). It can also come
+ * back unresolved, in which case the txn stays quarantined for a human.
+ */
+export interface CouncilVerdict {
+  resolved: boolean;
+  accountCode?: string | null;
+  projectSlug?: string | null;
+  businessPct?: number;
+  confidence: number;
+  rationale: string;
+  /** A research-agent access ask: the auditor files it and defers, never guesses. */
+  needsAccess?: { resource: string; reason: string; howToGrant: string } | null;
+  /** A hard human-in-the-loop gate (e.g. "aggressive home-office %"); never auto-acted. */
+  humanGate?: string | null;
+}
+
+/** Pluggable council escalator (injected so the auditor is testable with a mock). */
+export interface CouncilEscalator {
+  deliberate(input: CategorizationInput, context: LlmCategorizeContext): Promise<CouncilVerdict>;
+}
+
+export type AuditorVerdict =
+  | "auto_posted"
+  | "quarantined"
+  | "escalated"
+  | "deferred_access"
+  | "overridden";
+
+export type AuditorBasis = "rule" | "learned" | "llm" | "council" | "research" | "human";
+
+export interface AuditorDecision {
+  sourceTxnId: string;
+  verdict: AuditorVerdict;
+  basis: AuditorBasis;
+  accountCode: string | null;
+  confidence: number;
+  rationale: string;
+  accessRequestId?: number;
+}
+
 // ─── Month-end close ──────────────────────────────────────────────────────────
 export type CloseMode = "off" | "draft" | "live";
 

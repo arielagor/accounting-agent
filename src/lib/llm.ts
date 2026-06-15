@@ -26,6 +26,8 @@ import type {
   DocumentExtractInput,
   ExtractedDocument,
   ExtractedLine,
+  CouncilEscalator,
+  CouncilVerdict,
 } from "../core/types.js";
 import { personaPreamble } from "../core/persona.js";
 
@@ -376,6 +378,116 @@ export class ClaudeDocumentExtractor implements DocumentExtractor {
       totalCents: obj.totalCents == null ? null : toCents(obj.totalCents),
       currency: typeof obj.currency === "string" && obj.currency.trim() ? obj.currency.trim().toLowerCase() : "usd",
       lines,
+    };
+  }
+}
+
+// ─── Council (auditor escalation) ───────────────────────────────────────────────
+/** An unresolved verdict the auditor turns into a (still-quarantined) human review. */
+function unresolvedVerdict(rationale: string): CouncilVerdict {
+  return { resolved: false, accountCode: null, confidence: 0, rationale };
+}
+
+/**
+ * A Claude-backed council escalator. One $0 `claude -p` deliberation framed as three
+ * voices (operator / skeptic / strategist) that argue to a single verdict on an
+ * ambiguous transaction. It may RESOLVE (a confident account), flag a HUMAN-GATE
+ * (aggressive deduction / entity change / money movement — never auto-acted), or ask
+ * for ACCESS to data it needs (a research-agent request). Fail-soft: any spawn/parse
+ * failure returns an unresolved verdict so the auditor leaves the item for a human.
+ * The heavier multi-pass /council + adversarial-Gemini loop can be swapped in behind
+ * this same CouncilEscalator interface without touching the auditor.
+ */
+export class ClaudeCouncil implements CouncilEscalator {
+  constructor(private readonly runner: ClaudeRunner) {}
+
+  buildPrompt(input: CategorizationInput, context: LlmCategorizeContext): string {
+    const chartLines = context.chart.map((a) => `  ${a.code}  ${a.name} (${a.type})`).join("\n");
+    const projectLines = context.projects.length
+      ? context.projects.map((p) => `  ${p.slug}  ${p.name}`).join("\n")
+      : "  (none)";
+    const direction = input.isOutflow ? "outflow (expense candidate)" : "inflow (revenue candidate)";
+    return [
+      personaPreamble(),
+      "",
+      "A transaction could not be categorized automatically. Convene a three-voice",
+      "council and argue to ONE verdict:",
+      "  - operator: what is the most defensible business categorization?",
+      "  - skeptic: what would an auditor challenge? is this aggressive or mixed-use?",
+      "  - strategist: is there missing context that would change the answer?",
+      "",
+      "Chart of accounts (code  name  type):",
+      chartLines,
+      "",
+      "Projects (slug  name):",
+      projectLines,
+      "",
+      "Transaction:",
+      `  merchant: ${input.merchant}`,
+      `  amount (cents): ${input.amountCents}`,
+      `  direction: ${direction}`,
+      `  memo: ${input.memo}`,
+      `  posted: ${input.postedDate ?? "unknown"}`,
+      "",
+      "Rules: NEVER guess into a confident post. If a deduction is aggressive (large",
+      "home-office %, 100% vehicle, large §179, entity change, or any money movement),",
+      "set humanGate and do NOT resolve. If you genuinely need data you don't have (e.g.",
+      "an itemized receipt, access to a specific account), set needsAccess and do NOT resolve.",
+      "",
+      "Return ONLY a JSON object (no prose, no code fences) with exactly these keys:",
+      "  resolved    (boolean; true only for a confident, safe categorization)",
+      "  accountCode (string code above, or null)",
+      "  projectSlug (slug above, or null)",
+      "  businessPct (integer 0..100)",
+      "  confidence  (number 0..1)",
+      "  rationale   (one short sentence summarizing the council's reasoning)",
+      "  humanGate   (string reason if a human must decide, else null)",
+      "  needsAccess (object {resource, reason, howToGrant} if data is needed, else null)",
+    ].join("\n");
+  }
+
+  async deliberate(input: CategorizationInput, context: LlmCategorizeContext): Promise<CouncilVerdict> {
+    let raw: string;
+    try {
+      raw = await this.runner.run(this.buildPrompt(input, context));
+    } catch (e) {
+      return unresolvedVerdict(`council runner failed: ${errMsg(e)}`);
+    }
+    let parsed: unknown;
+    try {
+      parsed = extractJson(raw);
+    } catch {
+      return unresolvedVerdict("council output had no parseable JSON");
+    }
+    if (typeof parsed !== "object" || parsed === null) {
+      return unresolvedVerdict("council output JSON was not an object");
+    }
+    const obj = parsed as Record<string, unknown>;
+    const accountCode =
+      typeof obj.accountCode === "string" && obj.accountCode.trim() ? obj.accountCode.trim() : null;
+    const projectSlug =
+      typeof obj.projectSlug === "string" && obj.projectSlug.trim() ? obj.projectSlug.trim() : null;
+    const humanGate = typeof obj.humanGate === "string" && obj.humanGate.trim() ? obj.humanGate.trim() : null;
+    let needsAccess: CouncilVerdict["needsAccess"] = null;
+    if (obj.needsAccess && typeof obj.needsAccess === "object") {
+      const na = obj.needsAccess as Record<string, unknown>;
+      if (typeof na.resource === "string" && na.resource.trim()) {
+        needsAccess = {
+          resource: na.resource.trim(),
+          reason: typeof na.reason === "string" ? na.reason : "data needed to categorize",
+          howToGrant: typeof na.howToGrant === "string" ? na.howToGrant : "grant access in the Review screen",
+        };
+      }
+    }
+    return {
+      resolved: obj.resolved === true && accountCode !== null && !humanGate && !needsAccess,
+      accountCode,
+      projectSlug,
+      businessPct: clampPct(obj.businessPct),
+      confidence: clampConfidence(obj.confidence),
+      rationale: typeof obj.rationale === "string" ? obj.rationale : "",
+      humanGate,
+      needsAccess,
     };
   }
 }
