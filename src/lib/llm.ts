@@ -22,6 +22,10 @@ import type {
   LlmCategorizeContext,
   LlmCategorizer,
   LlmProposal,
+  DocumentExtractor,
+  DocumentExtractInput,
+  ExtractedDocument,
+  ExtractedLine,
 } from "../core/types.js";
 import { personaPreamble } from "../core/persona.js";
 
@@ -285,6 +289,93 @@ export class ClaudeCategorizer implements LlmCategorizer {
       confidence: clampConfidence(obj.confidence),
       needsSplit: obj.needsSplit === true,
       rationale,
+    };
+  }
+}
+
+// ─── Document extractor (receipts) ─────────────────────────────────────────────
+/** Coerce a money value the model might emit as dollars or cents into integer cents. */
+function toCents(v: unknown): number {
+  const n = typeof v === "number" ? v : Number(v);
+  if (!Number.isFinite(n)) return 0;
+  // The prompt asks for integer cents; round defensively in case it emits a float.
+  return Math.round(Math.abs(n));
+}
+
+/**
+ * The Claude-backed document extractor (the receipt analogue of ClaudeCategorizer).
+ * Parses a receipt/invoice/statement's text or CSV into structured line items, asking
+ * the model to map each to a chart code where it can. Fail-soft: any spawn/parse
+ * failure throws, and receipts.ts turns that into a document 'error' status (never a
+ * crash, never a fabricated split). Rides the Max plan ($0) like every call here.
+ */
+export class ClaudeDocumentExtractor implements DocumentExtractor {
+  constructor(private readonly runner: ClaudeRunner) {}
+
+  buildPrompt(input: DocumentExtractInput, context: LlmCategorizeContext): string {
+    const chartLines = context.chart.map((a) => `  ${a.code}  ${a.name} (${a.type})`).join("\n");
+    const projectLines = context.projects.length
+      ? context.projects.map((p) => `  ${p.slug}  ${p.name}`).join("\n")
+      : "  (none)";
+    const body = input.ocrText ?? input.csv ?? "";
+    return [
+      personaPreamble(),
+      "",
+      "Extract the line items from this receipt / invoice / statement so an aggregate",
+      "card charge can be split into its components. Map each line to a chart code when",
+      "you can; use null when unsure (do NOT guess a code).",
+      "",
+      "Chart of accounts (code  name  type):",
+      chartLines,
+      "",
+      "Projects (slug  name):",
+      projectLines,
+      "",
+      `Document (${input.contentType ?? "text"}${input.filename ? `, ${input.filename}` : ""}):`,
+      body.slice(0, 12000),
+      "",
+      "Return ONLY a JSON object (no prose, no code fences) with exactly these keys:",
+      "  vendorGuess (string or null; the merchant that issued it)",
+      "  docDate     (string 'YYYY-MM-DD' or null)",
+      "  totalCents  (integer cents of the grand total, or null)",
+      "  currency    (lowercase ISO, default 'usd')",
+      "  lines       (array; each: { description (string), amountCents (integer cents),",
+      "               qty (number, default 1), candidateAccountCode (string code above or null),",
+      "               candidateProjectSlug (slug above or null), businessPct (integer 0..100) })",
+    ].join("\n");
+  }
+
+  async extract(input: DocumentExtractInput, context: LlmCategorizeContext): Promise<ExtractedDocument> {
+    const raw = await this.runner.run(this.buildPrompt(input, context));
+    const parsed = extractJson(raw); // throws on no JSON; receipts.ts catches → 'error'
+    if (typeof parsed !== "object" || parsed === null) {
+      throw new Error("extractor output JSON was not an object");
+    }
+    const obj = parsed as Record<string, unknown>;
+    const rawLines = Array.isArray(obj.lines) ? obj.lines : [];
+    const lines: ExtractedLine[] = rawLines
+      .filter((l): l is Record<string, unknown> => typeof l === "object" && l !== null)
+      .map((l) => ({
+        description: typeof l.description === "string" ? l.description : "item",
+        amountCents: toCents(l.amountCents),
+        qty: Number.isFinite(Number(l.qty)) ? Number(l.qty) : 1,
+        candidateAccountCode:
+          typeof l.candidateAccountCode === "string" && l.candidateAccountCode.trim()
+            ? l.candidateAccountCode.trim()
+            : null,
+        candidateProjectSlug:
+          typeof l.candidateProjectSlug === "string" && l.candidateProjectSlug.trim()
+            ? l.candidateProjectSlug.trim()
+            : null,
+        businessPct: clampPct(l.businessPct),
+      }))
+      .filter((l) => l.amountCents > 0);
+    return {
+      vendorGuess: typeof obj.vendorGuess === "string" && obj.vendorGuess.trim() ? obj.vendorGuess.trim() : null,
+      docDate: typeof obj.docDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(obj.docDate) ? obj.docDate : null,
+      totalCents: obj.totalCents == null ? null : toCents(obj.totalCents),
+      currency: typeof obj.currency === "string" && obj.currency.trim() ? obj.currency.trim().toLowerCase() : "usd",
+      lines,
     };
   }
 }

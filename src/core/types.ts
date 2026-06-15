@@ -324,6 +324,54 @@ export interface TaxRateSet {
   state: Record<string, unknown>;
 }
 
+// ─── Documents / receipts (universal ingest + auto-split) ──────────────────────
+export type DocumentSourceKind = "email" | "upload" | "photo" | "csv" | "pdf";
+
+export type DocumentStatus =
+  | "pending"
+  | "extracted"
+  | "matched"
+  | "split"
+  | "filed"
+  | "unmatched"
+  | "error";
+
+/** A line item the extractor pulled out of a receipt/invoice/statement. */
+export interface ExtractedLine {
+  description: string;
+  amountCents: Cents;
+  qty?: number;
+  /** The extractor's best-guess chart code (validated against the chart before use). */
+  candidateAccountCode?: string | null;
+  candidateProjectSlug?: string | null;
+  businessPct?: number;
+}
+
+/** The structured result of parsing one document. */
+export interface ExtractedDocument {
+  vendorGuess: string | null;
+  docDate: string | null; // YYYY-MM-DD
+  totalCents: Cents | null;
+  currency: string;
+  lines: ExtractedLine[];
+}
+
+/** What the extractor is given (one or more available representations of the doc). */
+export interface DocumentExtractInput {
+  ocrText?: string;
+  csv?: string;
+  filename?: string;
+  contentType?: string;
+}
+
+/**
+ * Pluggable document extractor (the receipt analogue of LlmCategorizer). Injected so
+ * receipts.ts is testable with a deterministic mock — no subprocess, no network.
+ */
+export interface DocumentExtractor {
+  extract(input: DocumentExtractInput, context: LlmCategorizeContext): Promise<ExtractedDocument>;
+}
+
 // ─── Month-end close ──────────────────────────────────────────────────────────
 export type CloseMode = "off" | "draft" | "live";
 

@@ -203,6 +203,100 @@ export function buildStripePayoutEntry(args: StripePayoutArgs): NewJournalEntry 
   };
 }
 
+export interface SplitLineInput {
+  expenseAccountCode: string;
+  projectSlug?: string | null;
+  amountCents: Cents; // absolute, > 0
+  businessPct?: number;
+  memo?: string;
+}
+
+export interface SplitChargeArgs {
+  entryDate: string;
+  idempotencyKey: string;
+  sourceTxnId?: string | null;
+  /** The absolute amount that actually hit the card/bank (the aggregate charge). */
+  chargeCents: Cents;
+  /** The card/bank ledger account that was charged (credited for the full amount). */
+  paidFromAccountCode: string;
+  lines: SplitLineInput[];
+  /** Where an unexplained residual (chargeCents - sum(lines)) is parked. Default 9000. */
+  suspenseAccountCode?: string;
+  memo?: string;
+  source?: JournalSource;
+}
+
+/**
+ * Split one aggregate charge (e.g. APPLE.COM/BILL) into its component expense lines.
+ *   For each component:  Dr expense (business portion) [+ Dr 9500 Personal (rest)]
+ *   Any residual that doesn't tie to the components:  Dr 9000 Suspense (residual)
+ *   Cr paid-from account (the FULL charge amount)
+ * Balances by construction: total debits = sum(component amounts) + residual =
+ * chargeCents = the single credit. The residual line makes a not-quite-tying receipt
+ * post honestly (flagged in suspense) rather than silently fudging the numbers.
+ * Throws if the components exceed the charge (caller must guard with a tolerance).
+ */
+export function buildSplitChargeEntry(args: SplitChargeArgs): NewJournalEntry {
+  const charge = Math.abs(args.chargeCents);
+  const lines: NewJournalLine[] = [];
+  let componentsTotal = 0;
+  for (const c of args.lines) {
+    const amount = Math.abs(c.amountCents);
+    if (amount === 0) continue;
+    componentsTotal += amount;
+    const pct = clampPct(c.businessPct ?? 100);
+    const [businessCents, personalCents] = allocateCents(amount, [pct, 100 - pct]);
+    if (businessCents! > 0) {
+      lines.push({
+        accountCode: c.expenseAccountCode,
+        projectSlug: c.projectSlug ?? null,
+        debitCents: businessCents!,
+        creditCents: 0,
+        businessPct: pct,
+        memo: c.memo,
+      });
+    }
+    if (personalCents! > 0) {
+      lines.push({
+        accountCode: "9500",
+        projectSlug: "personal",
+        debitCents: personalCents!,
+        creditCents: 0,
+        businessPct: 0,
+        memo: c.memo ? `${c.memo} (personal portion)` : "personal portion",
+      });
+    }
+  }
+  const residual = charge - componentsTotal;
+  if (residual < 0) {
+    throw new Error(
+      `split components (${componentsTotal}) exceed charge (${charge}); caller must guard with a tolerance`,
+    );
+  }
+  if (residual > 0) {
+    lines.push({
+      accountCode: args.suspenseAccountCode ?? "9000",
+      debitCents: residual,
+      creditCents: 0,
+      memo: "unexplained residual from receipt split",
+    });
+  }
+  lines.push({
+    accountCode: args.paidFromAccountCode,
+    debitCents: 0,
+    creditCents: charge,
+    memo: args.memo ?? "aggregate charge",
+  });
+  return {
+    entryDate: args.entryDate,
+    description: args.memo ?? "Receipt split",
+    source: args.source ?? "bank",
+    sourceTxnId: args.sourceTxnId ?? null,
+    idempotencyKey: args.idempotencyKey,
+    lines,
+  };
+}
+
 function clampPct(p: number): number {
   if (!Number.isFinite(p)) return 100;
   return Math.max(0, Math.min(100, p));

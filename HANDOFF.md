@@ -1,87 +1,56 @@
-# HANDOFF — Accounting Agent
+# HANDOFF — Mint-class budgeting/accounting/advisory app
 
-Built 2026-06-13 in one autonomous overnight session (boil-the-ocean + fan-out). This is
-where things stand and exactly what you (Ariel) need to do next.
+**Goal (approved plan):** evolve the working single-tenant accounting engine into a commercial-grade
+retail budgeting + accounting + financial-advisory app (Mint-class, agent-augmented) for personal AND
+small business, deployable multi-tenant at app.agor.me with Ariel's books as cloud tenant #1.
+Plan file: `~/.claude/plans/system-reminder-message-sent-at-sat-enchanted-dragonfly.md`.
+(Phase 1 — the single-tenant month-end-close engine, built 2026-06-13 — is COMPLETE & TESTED and is
+the foundation this builds on; its details live in git history + the GBrain project page.)
 
-## What got built (Phase 1 — your portfolio, single-tenant) — COMPLETE & TESTED
+## Locked decisions
+1. Both tenancies in parallel (Ariel's instance + multi-tenant SKU)
+2. Web app + mobile PWA (Next.js/React, installable, Web Push)
+3. SimpleFIN now, Plaid later
+4. Auditor auto-acts, escalates to /council on doubt + research agents that file access-requests
+5. Hybrid (envelope/zero-based) + per-project budgets
+6. Universal receipt ingest + auto-split (PDF/CSV/email/photo + forwarding inbox)
+7. Full SMB (AR/AP, payroll, 1099, sales tax)
+8. Netlify + Supabase; migrate Ariel's books in as encrypted tenant #1; local Postgres = dev mirror
 
-A working, tested autonomous accounting agent in `C:\Users\ariel\.claude\projects\accounting-agent`.
-**142 tests green, `tsc --noEmit` clean.** Pushed to the PRIVATE GitHub repo **arielagor/accounting-agent**.
+## Milestones
+- **M7** Continuous ledger + web dashboard manual edits — _pending (web app)_
+- **M8** Universal receipt ingest + auto-split — **DONE** (engine + tests)
+- **M9** Autonomous auditor + council + access-requests — _next (engine)_
+- **M10** Budgets + realtime advisory + push — _pending_
+- **M11** Full SMB — _pending_
+- **M12** Cloud multi-tenant (Supabase RLS + migrate + Netlify functions) — _pending (one-way doors queued)_
 
-**The agent is ARMED and inert, waiting only on you to link accounts.** Done autonomously:
-the repo is pushed private, a real `INTEGRATION_ENC_KEY` is set, `CLOSE_MODE=live` (your choice),
-and the Windows scheduled tasks are registered (NightlySync 02:45, CloseIncremental 03:45,
-MonthEndClose day-1 06:00). They run inert every night until accounts are linked — and an
-empty period is never locked, so nothing is foreclosed before your data arrives.
+## State (2026-06-15)
+- Repo `arielagor/accounting-agent`, branch `master`. Baseline pre-build: 149 tests. Now **155 tests, tsc clean**.
+- Local DB: gbrain-pg:5433 db `accounting`, 28→33 acct_ tables, 323 raw txns, 152 journal entries, 175 open review.
+- **Migrations added & applied:** `sql/007_documents.sql`, `008_budgets.sql`, `009_advisory.sql`,
+  `010_smb.sql`, `011_auditor.sql` (all additive; `npm run migrate` is idempotent).
+- **M8 engine built:** `src/core/receipts.ts` (ingest→extract→match→split), `src/core/audit.ts`
+  (logAudit + requestAccess + hasAccess), `buildSplitChargeEntry` in `src/core/posting.ts`,
+  `ClaudeDocumentExtractor` in `src/lib/llm.ts`, document types in `src/core/types.ts`.
+  Proven: a forwarded Apple receipt splits the aggregate APPLE.COM/BILL charge into components that
+  tie to the cent and clears the quarantine; an unmatchable receipt → 'unmatched' + access-request.
 
-- **Storage:** a separate `accounting` database on your existing `gbrain-pg` Postgres
-  (localhost:5433). 28 `acct_*` tables. Money is integer cents everywhere; a DEFERRED
-  trigger rejects any unbalanced journal entry (verified).
-- **Ingestion (read-only):** `bin/sync.ts` — SimpleFIN provider, idempotent upsert, node-locked,
-  escalates expired links by email without blocking other accounts. **No code path can move money**
-  (the provider interface has no transfer/pay verb).
-- **Ledger + posting:** double-entry, idempotent, centralized debit/credit direction (`posting.ts`).
-- **Categorization:** 3-tier — learned merchant rule → regex rule → `claude -p` ($0, API key stripped)
-  → escalate. Never guesses below the confidence threshold; quarantines instead.
-- **Allocation:** shared costs split per project (even/fixed/usage/revenue/direct); nets to zero
-  (fixed a double-allocation bug the close test caught).
-- **Tax engine (modular toggle):** sole-prop / single-LLC / multi-LLC / S-corp / C-corp / organize-only,
-  year-scoped rates (no literals in code). Tests prove S-corp lowers the SE burden vs sole-prop.
-- **Persona:** Hank Calloway, CPA — creative, pro-taxpayer, works every LEGAL angle, flags aggressive
-  positions for CPA sign-off, never crosses a red line (`src/core/persona.ts`).
-- **Month-end close:** `bin/close-agent.ts` → `src/core/close.ts`. Named-stage pipeline, off→draft→live
-  gating, idempotent period-lock, trial-balance hard stop, controller-grade close package (P&L,
-  cash, Schedule-C rollup, roll-forward that foots, variance commentary, exceptions), tie-out check,
-  and a verdict re-queried from Postgres (never an exit code). Accruals are DRAFT-for-approval.
-  Emails a ranked digest with one-line reply verbs.
-- **Finance-plugin methodology** (month-end-closer, gl-recon, roll-forward, variance, accrual) harvested
-  into the design (`docs/decisions/0002`).
+## Conventions (match these)
+- TS ESM NodeNext: import sibling `.ts` as `.js`. Money = integer cents (BIGINT). `tenant_id` on every table.
+- All postings go through `ledger.postEntry()` (balanced trigger + idempotency). Direction lives ONLY in `posting.ts`.
+- `postEntry` opens its own tx → DON'T nest it inside `sql.begin` (porsager `tx` has no `.begin`); sequence
+  idempotent steps instead (see `resolve.ts` / `receipts.ts splitCharge`).
+- LLM via `spawnClaudeRunner` (ANTHROPIC_API_KEY stripped = $0 Max plan; `--model claude-opus-4-8` fallback;
+  `extractJson` first-balanced-object). Cloud serverless is the ONLY sanctioned `ANTHROPIC_API_KEY` path (flagged).
+- DB-backed tests: dedicated tenant, skip if no DB, clean before+after. Run `npx tsc --noEmit` before every commit.
 
-## What got built (Phase 2 — productized SKU at app.agor.me) — CONTRACT ONLY, on a DRAFT PR
+## One-way doors queued for Ariel (do NOT do unsupervised)
+- Linking real bank/card accounts; flipping CLOSE_MODE to live on real books; creating the Supabase project;
+  enabling the cloud ANTHROPIC_API_KEY spend; any deploy to app.agor.me; merging the agor-agents SKU PR;
+  granting access-requests; approving aggressive deductions; entity-type changes; any real money movement.
 
-`agor-agents` PR **#13** (DRAFT, DO NOT MERGE): the Accounting SKU manifest + registration +
-integration types + multi-tenant RLS migration + eval gate (minScore 0.95) + 7 contract tests.
-**230 agor-agents tests green, tsc clean.** The live multi-tenant worker is deferred (see below).
-
-## DONE autonomously (every reversible door I was capable of)
-
-- [x] Pushed Phase-1 repo PRIVATE: `arielagor/accounting-agent` (master).
-- [x] Set a real 32-byte `INTEGRATION_ENC_KEY` in `.env` (dev key replaced; no tokens encrypted yet).
-- [x] Set `CLOSE_MODE=live` (your explicit choice).
-- [x] Registered the scheduled tasks (NightlySync / CloseIncremental / MonthEndClose), verified Ready.
-- [x] Empty-period lock guard so the armed system foreclosures nothing before your data arrives.
-- [x] SMTP for the digest: NOT set (no creds) — add `SMTP_USER`/`SMTP_PASS` in `.env` to get emailed digests.
-
-## THE ONE REMAINING GATE (genuine blocker — needs YOU)
-
-**Link your accounts.** I cannot create your SimpleFIN account or enter your bank logins/MFA, and
-the ~$15/yr SimpleFIN spend is yours to approve. The moment you do this, the armed agent goes live:
-
-1. Approve ~$15/yr; create a connection at https://bridge.simplefin.org; copy the setup token.
-2. `npm run link -- --setup-token <token> --institution "Chase"`
-3. `npm run link -- --map <providerAccountId>=1010` (checking), `=2010` (a card), etc.
-4. Verify coverage; if a key bank isn't supported, tell me and we add Plaid for that account.
-
-Optional before trusting full-auto: do ONE dry run first — set `CLOSE_MODE=draft` in `.env`, run
-`npm run sync && npm run close -- --mode=close --period <YYYY-MM>`, read the digest, then set it back
-to `live`. Add SMTP creds if you want the digest emailed rather than just logged.
-
-To pause everything: set `CLOSE_MODE=off` in `.env`, or `powershell -File scripts/register-tasks.ps1 -Unregister`.
-
-## Supervised follow-up (my capability ends at a live-app dependency change)
-
-6. **Productization — the live multi-tenant worker** — port the engine into
-   `agor-agents/src/lib/accounting/`, add the `postgres` dep + Supabase RLS store, per-tenant `runClose`
-   under an advisory lock, a `backend-worker` deliverable emitter + Netlify scheduled fan-out. Then the
-   SKU's 0.95 eval gate runs live and the SKU becomes provisionable. Review PR #13 first.
-
-## Operate it
-`npm run migrate` (idempotent) · `npm run link` · `npm run sync` · `npm run close -- --mode=close`
-· `npm test` · `npm run typecheck`. The `.env` ladder (`CLOSE_MODE=off|draft|live`) is the master switch.
-
-## Decisions / verdicts this session
-First `/council` on overnight scope returned null (quota/parse) and was superseded by your direct
-"take it all the way" + "use workflows and fan out" + "creative republican accountant" + "reactivate
-finance skills" directives. Finance plugins are installed; their methodology is baked in; their paid
-external data-feeds stay disabled (cost rule). Decision docs: `docs/decisions/0001` (foundation),
-`0002` (finance methodology); agor-agents `docs/decisions/0025` (SKU).
+## Next step
+Build M9 auditor engine (`src/core/auditor.ts`) wrapping `categorize.ts`: confident → auto-post; doubtful →
+council escalation; missing data → research agent files an access-request. Write `acct_auditor_decisions` +
+`acct_audit_log` on every decision. Then M10 budgets/advisory, M11 SMB, then the web app (M7) + cloud (M12).
