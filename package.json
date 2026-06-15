@@ -23,18 +23,23 @@
     "export-year": "node --import tsx bin/export-year.ts",
     "send-digest": "node --import tsx bin/send-digest.ts",
     "google-consent": "node --import tsx bin/google-consent.ts",
-    "push-gsheet": "node --import tsx bin/push-gsheet.ts"
+    "push-gsheet": "node --import tsx bin/push-gsheet.ts",
+    "vapid-keys": "node --import tsx bin/vapid-keys.ts",
+    "audit": "node --import tsx bin/audit.ts",
+    "advise": "node --import tsx bin/advise.ts"
   },
   "dependencies": {
     "exceljs": "^4.4.0",
     "nodemailer": "^6.9.16",
     "pdfkit": "^0.19.1",
-    "postgres": "^3.4.5"
+    "postgres": "^3.4.5",
+    "web-push": "^3.6.7"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/nodemailer": "^6.4.17",
     "@types/pdfkit": "^0.17.6",
+    "@types/web-push": "^3.6.4",
     "tsx": "^4.19.2",
     "typescript": "^5.7.2"
   }

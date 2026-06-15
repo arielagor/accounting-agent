@@ -12,6 +12,51 @@ export type PeriodKind = "month" | "quarter" | "year";
 export type BudgetScope = "category" | "project" | "overall";
 export type BudgetStatus = "under" | "warn" | "over" | "projected_over";
 
+// ─── Mutations ────────────────────────────────────────────────────────────────────
+export interface UpsertBudgetInput {
+  name: string;
+  periodKind: PeriodKind;
+  scope: BudgetScope;
+  accountCode?: string | null;
+  projectSlug?: string | null;
+  limitCents: Cents;
+  method?: "envelope" | "zero_based" | "fixed";
+  rollover?: boolean;
+  /** Optional alert threshold (pct of limit); creates/updates the budget's alert. */
+  alertThresholdPct?: number;
+}
+
+/** Create or update a budget (keyed by tenant + period kind + scope target) + its alert. */
+export async function upsertBudget(sql: Sql, tenantId: string, input: UpsertBudgetInput): Promise<number> {
+  const accountCode = input.scope === "category" ? input.accountCode ?? null : null;
+  const projectSlug = input.scope === "project" ? input.projectSlug ?? null : null;
+  const existing = await sql<{ id: number }[]>`
+    SELECT id FROM acct_budgets
+    WHERE tenant_id = ${tenantId} AND period_kind = ${input.periodKind} AND scope = ${input.scope}
+      AND COALESCE(account_code,'') = ${accountCode ?? ""} AND COALESCE(project_slug,'') = ${projectSlug ?? ""}`;
+  let id: number;
+  if (existing.length > 0) {
+    id = existing[0]!.id;
+    await sql`UPDATE acct_budgets SET name = ${input.name}, limit_cents = ${input.limitCents},
+              method = ${input.method ?? "envelope"}, rollover = ${input.rollover ?? false},
+              enabled = true, updated_at = now() WHERE id = ${id}`;
+  } else {
+    const [row] = await sql<{ id: number }[]>`
+      INSERT INTO acct_budgets (tenant_id, name, period_kind, scope, account_code, project_slug, limit_cents, method, rollover)
+      VALUES (${tenantId}, ${input.name}, ${input.periodKind}, ${input.scope}, ${accountCode}, ${projectSlug},
+              ${input.limitCents}, ${input.method ?? "envelope"}, ${input.rollover ?? false})
+      RETURNING id`;
+    id = row!.id;
+  }
+  if (input.alertThresholdPct !== undefined) {
+    await sql`
+      INSERT INTO acct_budget_alerts (budget_id, tenant_id, threshold_pct, channel)
+      VALUES (${id}, ${tenantId}, ${input.alertThresholdPct}, 'push')
+      ON CONFLICT (budget_id, threshold_pct) DO UPDATE SET enabled = true`;
+  }
+  return id;
+}
+
 // ─── Period math (pure) ─────────────────────────────────────────────────────────
 /** The period key a date falls in, per kind: 'YYYY-MM' | 'YYYY-Qn' | 'YYYY'. */
 export function periodKeyFor(kind: PeriodKind, dateISO: string): string {

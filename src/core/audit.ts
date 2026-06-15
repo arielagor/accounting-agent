@@ -72,6 +72,24 @@ export async function requestAccess(
   return { id: row!.id, alreadyOpen: true };
 }
 
+/** Grant (or deny) an access-request — a human action from the Review screen. */
+export async function resolveAccessRequest(
+  sql: Sql,
+  tenantId: string,
+  id: number,
+  decision: "granted" | "denied",
+  grantedBy = "human",
+): Promise<boolean> {
+  const rows = await sql<{ id: number; resource: string }[]>`
+    UPDATE acct_access_requests
+    SET status = ${decision}, granted_at = now(), granted_by = ${grantedBy}
+    WHERE id = ${id} AND tenant_id = ${tenantId} AND status = 'open'
+    RETURNING id, resource`;
+  if (rows.length === 0) return false;
+  await logAudit(sql, tenantId, "human", `access_${decision}`, rows[0]!.resource, { accessRequestId: id });
+  return true;
+}
+
 /** Has the user granted this resource? Used to gate a research agent before it asks again. */
 export async function hasAccess(sql: Sql, tenantId: string, resource: string): Promise<boolean> {
   const rows = await sql<{ n: string }[]>`

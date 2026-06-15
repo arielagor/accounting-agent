@@ -113,3 +113,27 @@ export async function applyManualCategorization(
 async function resolveReview(sql: Sql, sourceTxnId: string): Promise<void> {
   await sql`UPDATE acct_review_queue SET status = 'resolved', resolved_at = now() WHERE source_txn_id = ${sourceTxnId} AND status = 'open'`;
 }
+
+/**
+ * Change the category of an ALREADY-POSTED transaction (a manual dashboard edit).
+ * Voids the existing non-void entry for the txn, then posts a fresh entry to the new
+ * account (relearning the merchant). Idempotent-safe: if nothing is posted yet, this
+ * is just a normal categorization. The void keeps the audit trail (status='void',
+ * excluded from the trial balance) rather than deleting history.
+ */
+export async function recategorizeTransaction(
+  sql: Sql,
+  tenantId: string,
+  sourceTxnId: string,
+  accountCode: string,
+  businessPct = 100,
+  createdBy: CreatedBy = "human",
+): Promise<ManualResult> {
+  // Void any current posting so applyManualCategorization will re-post cleanly.
+  await sql`UPDATE acct_journal_entries SET status = 'void'
+           WHERE tenant_id = ${tenantId} AND source_txn_id = ${sourceTxnId} AND status <> 'void'`;
+  // Re-open the review row so the standard path resolves it again (keeps state honest).
+  await sql`UPDATE acct_review_queue SET status = 'open', resolved_at = NULL
+           WHERE source_txn_id = ${sourceTxnId} AND status = 'resolved'`;
+  return applyManualCategorization(sql, tenantId, sourceTxnId, accountCode, businessPct, true, createdBy);
+}

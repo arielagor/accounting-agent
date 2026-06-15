@@ -151,3 +151,16 @@ export async function generateRecommendations(
 
   return { runId, generated: seeds.length, seeds };
 }
+
+/** Set a recommendation's status (ack / dismissed / done / snoozed) — a UI action. */
+export async function setRecommendationStatus(
+  sql: Sql,
+  tenantId: string,
+  id: number,
+  status: "new" | "ack" | "dismissed" | "done" | "snoozed",
+): Promise<boolean> {
+  const rows = await sql<{ id: number }[]>`
+    UPDATE acct_recommendations SET status = ${status}, updated_at = now()
+    WHERE id = ${id} AND tenant_id = ${tenantId} RETURNING id`;
+  return rows.length > 0;
+}
