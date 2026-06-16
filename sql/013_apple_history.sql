@@ -14,8 +14,8 @@ CREATE TABLE IF NOT EXISTS acct_apple_purchases (
   period        text,                                 -- "Renews ...", "Expires: ...", date range, etc.
   amount_cents  bigint      NOT NULL DEFAULT 0,        -- this line's price (0 = free)
   order_total_cents bigint  NOT NULL DEFAULT 0,        -- the order's grand total
-  bucket        text        NOT NULL DEFAULT 'review'  -- business | personal | review
-                CHECK (bucket IN ('business','personal','review')),
+  bucket        text        NOT NULL DEFAULT 'review'  -- business | personal | review | free
+                CHECK (bucket IN ('business','personal','review','free')),
   account_code  text,                                 -- the classified chart code (when confident)
   created_at    timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT acct_apple_uq UNIQUE (tenant_id, order_id, line_no)

@@ -103,7 +103,7 @@ function buildItem(buf: string[], amountCents: number, free: boolean): AppleItem
 }
 
 // ─── Classification ───────────────────────────────────────────────────────────────
-export type Bucket = "business" | "personal" | "review";
+export type Bucket = "business" | "personal" | "review" | "free";
 export interface Classification {
   bucket: Bucket;
   accountCode: string | null;
@@ -126,6 +126,15 @@ const BUSINESS: Array<[RegExp, string]> = [
   [/google cloud|\baws\b|amazon web|azure|cloudflare|supabase|render|fly\.io|railway|vercel|netlify|firebase|tailscale/, "6160"],
   [/apple developer|apple podcasters|developer program|app store connect/, "6110"],
   [/linkedin/, "6150"],
+  // Productivity / writing / comms tools (he publishes + runs products → business).
+  [/medium:|a medium corporation|clean email|burner: second|second phone|ad hoc labs/, "6150"],
+  [/genius fax|genius scan|grizzly labs|signeasy|docusign|signnow|adobe (acrobat|fill|sign|scan)|camscanner|scannable/, "6150"],
+  [/goodreader|good\.iware|itranslate|tapeacall|mosaic s\.r\.l|network analyzer|techet|onion browser|hotspot shield|nordvpn|vpn express|opera/, "6150"],
+  [/quickbooks|intuit|turbotax|expensify|harvest|bill\.com|wave|bench accounting|monarch|ynab|quicken|mint|empower|personal capital/, "6150"],
+  // Creative / design / audio-video production tools (content business).
+  [/autocad|autodesk|concepts|tophatch|home design 3d|anuman|morpholio|procreate|savage interactive|pixelmator|sketchbook|artstudio|lucky clan|affinity|linearity|bazaart|glitch|ifont|wolfram/, "6150"],
+  [/fl studio|image line|native instruments|imaschine|hokusai|wooji|djay|algoriddim|edjing|tayasui|figure - make music|reason studios|alchemy synth/, "6150"],
+  [/photoshop|lightroom|illustrator|premiere|after effects|capcut|splice|videon|8mm|mextures|tangent|repix|ultravisual|prisma|typorama|font candy|phonto/, "6150"],
 ];
 
 /** High-confidence PERSONAL (non-deductible) — entertainment / dating / games / kids / food / fitness. */
@@ -158,11 +167,17 @@ export interface AppleImportSummary {
   businessItems: number;
   personalItems: number;
   reviewItems: number;
+  freeItems: number;
   businessSpentCents: number;
   personalSpentCents: number;
   totalSpentCents: number;
   rulesLearned: number;
   dateRange: { from: string; to: string } | null;
+}
+
+/** Final bucket for a catalog line: $0 downloads are 'free' (not real expenses). */
+function bucketFor(amountCents: number, free: boolean, classified: Bucket): Bucket {
+  return amountCents === 0 || free ? "free" : classified;
 }
 
 /**
@@ -176,7 +191,7 @@ export async function importAppleHistory(sql: Sql, tenantId: string, text: strin
   );
   const learned = new Set<string>();
   const s: AppleImportSummary = {
-    orders: orders.length, items: 0, businessItems: 0, personalItems: 0, reviewItems: 0,
+    orders: orders.length, items: 0, businessItems: 0, personalItems: 0, reviewItems: 0, freeItems: 0,
     businessSpentCents: 0, personalSpentCents: 0, totalSpentCents: 0, rulesLearned: 0, dateRange: null,
   };
   let minD = "9999-99-99", maxD = "0000-00-00";
@@ -189,16 +204,18 @@ export async function importAppleHistory(sql: Sql, tenantId: string, text: strin
       s.items += 1;
       s.totalSpentCents += it.amountCents;
       const c = classifyAppleItem(it.text);
-      const accountCode = c.accountCode && validCodes.has(c.accountCode) ? c.accountCode : c.accountCode;
-      if (c.bucket === "business") { s.businessItems += 1; s.businessSpentCents += it.amountCents; }
-      else if (c.bucket === "personal") { s.personalItems += 1; s.personalSpentCents += it.amountCents; }
+      const bucket = bucketFor(it.amountCents, it.free, c.bucket);
+      const accountCode = bucket === "free" ? null : c.accountCode;
+      if (bucket === "free") s.freeItems += 1;
+      else if (bucket === "business") { s.businessItems += 1; s.businessSpentCents += it.amountCents; }
+      else if (bucket === "personal") { s.personalItems += 1; s.personalSpentCents += it.amountCents; }
       else s.reviewItems += 1;
 
       await sql`
         INSERT INTO acct_apple_purchases
           (tenant_id, order_id, order_date, line_no, item, vendor, period, amount_cents, order_total_cents, bucket, account_code)
         VALUES (${tenantId}, ${o.orderId}, ${o.date}, ${lineNo}, ${it.name}, ${it.vendor}, ${it.period},
-                ${it.amountCents}, ${o.totalCents}, ${c.bucket}, ${accountCode})
+                ${it.amountCents}, ${o.totalCents}, ${bucket}, ${accountCode})
         ON CONFLICT (tenant_id, order_id, line_no) DO UPDATE SET
           item = EXCLUDED.item, vendor = EXCLUDED.vendor, amount_cents = EXCLUDED.amount_cents,
           bucket = EXCLUDED.bucket, account_code = EXCLUDED.account_code`;
@@ -222,6 +239,47 @@ export async function importAppleHistory(sql: Sql, tenantId: string, text: strin
   s.rulesLearned = learned.size;
   s.dateRange = orders.length ? { from: minD, to: maxD } : null;
   return s;
+}
+
+/**
+ * Re-run classification + free-bucketing over the ALREADY-cataloged rows (no re-paste
+ * needed). Recomputes bucket/account_code for every row and re-learns merchant rules
+ * for confidently-classified recurring subscriptions. Returns the new bucket tally.
+ */
+export async function reclassifyAppleCatalog(
+  sql: Sql,
+  tenantId: string,
+): Promise<{ updated: number; business: number; personal: number; review: number; free: number; rulesLearned: number }> {
+  const rows = await sql<
+    { id: number; item: string; vendor: string | null; period: string | null; amount_cents: string }[]
+  >`SELECT id, item, vendor, period, amount_cents FROM acct_apple_purchases WHERE tenant_id = ${tenantId}`;
+  const validCodes = new Set(
+    (await sql<{ code: string }[]>`SELECT code FROM acct_chart WHERE is_active`).map((r) => r.code),
+  );
+  const learned = new Set<string>();
+  const out = { updated: 0, business: 0, personal: 0, review: 0, free: 0, rulesLearned: 0 };
+  for (const r of rows) {
+    const amount = Number(r.amount_cents);
+    const text = `${r.item} ${r.vendor ?? ""}`.toLowerCase();
+    const c = classifyAppleItem(text);
+    const bucket = bucketFor(amount, amount === 0, c.bucket);
+    const accountCode = bucket === "free" ? null : c.accountCode;
+    out[bucket] += 1;
+    await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${accountCode} WHERE id = ${r.id}`;
+    out.updated += 1;
+    if (bucket !== "free" && bucket !== "review" && c.accountCode && validCodes.has(c.accountCode) && amount > 0 && r.period) {
+      const key = normalizeMerchant(r.vendor ?? r.item);
+      if (key && !learned.has(key)) {
+        learned.add(key);
+        await sql`
+          INSERT INTO acct_merchant_rules (merchant_key, account_code, project_slug, business_pct, learned_from)
+          VALUES (${key}, ${c.accountCode}, ${c.projectSlug}, ${c.businessPct}, 'llm_accepted')
+          ON CONFLICT (merchant_key) DO NOTHING`;
+      }
+    }
+  }
+  out.rulesLearned = learned.size;
+  return out;
 }
 
 /** Heuristic: does this pasted text look like a bulk Apple purchase-history export? */
