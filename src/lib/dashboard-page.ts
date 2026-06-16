@@ -89,7 +89,7 @@ const esc=s=>(s||'').toString().replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>'
 function applyMobile(on){document.body.classList.toggle('mobile',on);const b=$('#mtoggle');if(b)b.classList.toggle('on',on);try{localStorage.setItem('acct_mobile',on?'1':'0')}catch(e){}}
 function toggleMobile(){applyMobile(!document.body.classList.contains('mobile'))}
 let PERIOD='',CHART=[],CONFIG={};
-const TABS=[['overview','Overview'],['txns','Transactions'],['budgets','Budgets'],['advisor','Advisor'],['receipts','Receipts'],['smb','Business'],['review','Review']];
+const TABS=[['overview','Overview'],['txns','Transactions'],['budgets','Budgets'],['advisor','Advisor'],['receipts','Receipts'],['apple','Apple'],['smb','Business'],['review','Review']];
 let TAB='overview';
 function renderTabs(){$('#tabs').innerHTML=TABS.map(([k,l])=>'<button class="'+(k===TAB?'active':'')+'" onclick="go(\\''+k+'\\')">'+l+'</button>').join('')}
 function go(t){TAB=t;renderTabs();draw()}
@@ -109,6 +109,7 @@ async function draw(){const w=$('#wrap');w.innerHTML='<div class="card"><span cl
   else if(TAB==='budgets')await drawBudgets();
   else if(TAB==='advisor')await drawAdvisor();
   else if(TAB==='receipts')await drawReceipts();
+  else if(TAB==='apple')await drawApple();
   else if(TAB==='smb')await drawSmb();
   else if(TAB==='review')await drawReview();
  }catch(e){w.innerHTML='<div class="card err">Error: '+esc(e.message||e)+'</div>'}}
@@ -185,6 +186,24 @@ async function upRcpt(btn){const t=$('#rtext').value;if(!t.trim())return;btn.dis
    +'<b>'+s.businessItems+'</b> business ('+usd0(s.businessSpentCents)+'), '+s.personalItems+' personal, '+s.reviewItems+' to review · '+s.rulesLearned+' rules learned.';
    $('#rtext').value='';btn.disabled=false;btn.textContent='Process';return}
  if(r.ok){m.className='ok';m.textContent='✓ '+(r.stage==='split'&&r.result&&r.result.posted?'split posted':r.stage)+' (doc '+r.documentId+')';setTimeout(draw,700)}else{m.className='err';m.textContent='✗ '+(r.error||'failed');btn.disabled=false;btn.textContent='Process'}}
+
+async function drawApple(){const d=await jget('/api/apple');
+ const opts=(d.chart||[]).map(c=>'<option value="'+c.code+'">'+c.code+' '+esc(c.name)+'</option>').join('');
+ const sm={}; (d.summary||[]).forEach(s=>sm[s.bucket]=s);
+ const card=(label,b,cls)=>'<div class="card"><h2>'+label+'</h2><div class="kpi '+(cls||'')+'">'+(sm[b]?sm[b].n:0)+'</div><div class="sub">'+(sm[b]?usd(sm[b].cents):'$0.00')+'</div></div>';
+ let h=card('Business','business','pos')+card('Personal','personal','')+card('Free apps','free','muted')+card('To review','review','warnc');
+ h+='<div class="card full"><h2>Apple items to review ('+(d.review?d.review.length:0)+') — your choice teaches the system</h2>'
+   +'<div class="sub" style="margin-bottom:8px">Each pick files it AND learns a merchant rule, so that vendor auto-categorizes in your bank feed from now on.</div>';
+ if(!d.review||!d.review.length)h+='<div class="muted">Nothing left to review 🎉</div>';
+ else h+='<table><tr><th>Date</th><th>Item</th><th class="r">Amt</th><th>Business as…</th><th></th></tr>'
+   +d.review.map(r=>'<tr class="arow" data-id="'+r.id+'"><td class="muted">'+(r.date||'')+'</td><td>'+esc(r.item)+'<div class="sub muted">'+esc(r.vendor||'')+'</div></td><td class="r">'+usd(r.amountCents)+'</td>'
+     +'<td><select class="acode">'+opts+'</select></td>'
+     +'<td class="row2"><button onclick="classApple(this,\\'business\\')">Business</button><button onclick="classApple(this,\\'personal\\')">Personal</button> <span class="ok"></span></td></tr>').join('')+'</table>';
+ h+='</div>';
+ $('#wrap').innerHTML=h;}
+async function classApple(btn,bucket){const tr=btn.closest('tr');const id=Number(tr.dataset.id);const code=bucket==='business'?tr.querySelector('.acode').value:null;
+ btn.disabled=true;const r=await jpost('/api/apple/classify',{id,bucket,accountCode:code});const sp=tr.querySelector('.ok');
+ if(r.ok){sp.className='ok';sp.textContent='✓ '+bucket+(r.learnedVendor?' · learned':'');setTimeout(()=>tr.remove(),500)}else{sp.className='err';sp.textContent='✗';btn.disabled=false}}
 
 async function drawSmb(){const d=await jget('/api/smb');
  const ag=(t,a)=>'<div class="card"><h2>'+t+' aging</h2><table><tr><td>Current</td><td class="r">'+usd(a.current)+'</td></tr><tr><td>1–30</td><td class="r">'+usd(a.d1_30)+'</td></tr><tr><td>31–60</td><td class="r">'+usd(a.d31_60)+'</td></tr><tr><td>61–90</td><td class="r '+(a.d61_90?'warnc':'')+'">'+usd(a.d61_90)+'</td></tr><tr><td>90+</td><td class="r '+(a.d90plus?'neg':'')+'">'+usd(a.d90plus)+'</td></tr></table></div>';

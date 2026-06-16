@@ -27,7 +27,9 @@ import {
   documents,
   accessRequests,
   smbSummary,
+  appleCatalog,
 } from "../src/lib/app-data.js";
+import { setAppleClassification, type Bucket } from "../src/core/apple-history.js";
 import { upsertBudget, type PeriodKind, type BudgetScope } from "../src/core/budgets.js";
 import { generateRecommendations, setRecommendationStatus } from "../src/core/recommendations.js";
 import { resolveAccessRequest } from "../src/core/audit.js";
@@ -217,6 +219,20 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "GET" && path === "/api/smb") {
       return json(res, 200, await smbSummary(sql, tenant, todayISO()));
+    }
+    if (req.method === "GET" && path === "/api/apple") {
+      const data = await appleCatalog(sql, tenant);
+      const chart = await sql<{ code: string; name: string }[]>`
+        SELECT code, name FROM acct_chart WHERE is_active AND type IN ('expense','cogs') ORDER BY code`;
+      return json(res, 200, { ...data, chart });
+    }
+    if (req.method === "POST" && path === "/api/apple/classify") {
+      const b = await readBody(req);
+      const r = await setAppleClassification(
+        sql, tenant, Number(b.id), String(b.bucket) as Bucket,
+        b.accountCode ? String(b.accountCode) : null,
+      );
+      return json(res, 200, r);
     }
     if (req.method === "POST" && path === "/api/push/subscribe") {
       const b = await readBody(req);

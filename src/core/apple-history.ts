@@ -385,6 +385,43 @@ export async function auditAppleReview(
   return out;
 }
 
+/**
+ * Apply a HUMAN classification to a catalog item and TEACH the system: update the
+ * row's bucket/account, and learn an authoritative merchant rule (learned_from
+ * 'human') so the same vendor auto-categorizes in the bank feed forever after. This
+ * is how a review choice on the Apple catalog compounds — same loop as the
+ * Transactions tab's applyManualCategorization.
+ */
+export async function setAppleClassification(
+  sql: Sql,
+  tenantId: string,
+  id: number,
+  bucket: Bucket,
+  accountCode: string | null,
+): Promise<{ ok: boolean; learnedVendor?: string }> {
+  const rows = await sql<{ item: string; vendor: string | null }[]>`
+    SELECT item, vendor FROM acct_apple_purchases WHERE id = ${id} AND tenant_id = ${tenantId}`;
+  if (rows.length === 0) return { ok: false };
+  const code = bucket === "personal" ? "9500" : accountCode;
+  await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${code} WHERE id = ${id} AND tenant_id = ${tenantId}`;
+
+  let learnedVendor: string | undefined;
+  if ((bucket === "business" || bucket === "personal") && code) {
+    const merchant = rows[0]!.vendor ?? rows[0]!.item;
+    const key = normalizeMerchant(merchant);
+    if (key) {
+      await sql`
+        INSERT INTO acct_merchant_rules (merchant_key, account_code, project_slug, business_pct, learned_from)
+        VALUES (${key}, ${code}, ${bucket === "business" ? "shared" : "personal"}, ${bucket === "business" ? 100 : 0}, 'human')
+        ON CONFLICT (merchant_key) DO UPDATE SET
+          account_code = EXCLUDED.account_code, project_slug = EXCLUDED.project_slug,
+          business_pct = EXCLUDED.business_pct, learned_from = 'human', last_confirmed_at = now()`;
+      learnedVendor = merchant;
+    }
+  }
+  return { ok: true, learnedVendor };
+}
+
 /** Heuristic: does this pasted text look like a bulk Apple purchase-history export? */
 export function looksLikeAppleHistory(text: string): boolean {
   const totals = (text.match(/^Total\s+\$/gm) ?? []).length;

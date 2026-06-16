@@ -193,6 +193,27 @@ export interface SmbSummary {
   salesTax: { jurisdiction: string; period: string; collectedCents: number; remittedCents: number; status: string }[];
 }
 
+// ─── Apple purchase catalog ────────────────────────────────────────────────────────
+export interface AppleCatalog {
+  summary: { bucket: string; n: number; cents: number }[];
+  review: { id: number; item: string; vendor: string | null; period: string | null; amountCents: number; date: string }[];
+}
+
+export async function appleCatalog(sql: Sql, tenant: string): Promise<AppleCatalog> {
+  const summary = (
+    await sql<{ bucket: string; n: string; cents: string }[]>`
+      SELECT bucket, count(*) n, COALESCE(SUM(amount_cents),0) cents
+      FROM acct_apple_purchases WHERE tenant_id = ${tenant} GROUP BY bucket ORDER BY count(*) DESC`
+  ).map((r) => ({ bucket: r.bucket, n: D(r.n), cents: D(r.cents) }));
+  const review = (
+    await sql<{ id: number; item: string; vendor: string | null; period: string | null; amount_cents: string; d: string }[]>`
+      SELECT id, item, vendor, period, amount_cents, to_char(order_date,'YYYY-MM-DD') d
+      FROM acct_apple_purchases WHERE tenant_id = ${tenant} AND bucket = 'review' AND amount_cents > 0
+      ORDER BY amount_cents DESC LIMIT 200`
+  ).map((r) => ({ id: r.id, item: r.item, vendor: r.vendor, period: r.period, amountCents: D(r.amount_cents), date: r.d }));
+  return { summary, review };
+}
+
 export async function smbSummary(sql: Sql, tenant: string, asOfISO: string): Promise<SmbSummary> {
   const taxYear = Number(asOfISO.slice(0, 4));
   const [arAging, apAging, contractors1099, stax] = await Promise.all([
