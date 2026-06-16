@@ -45,7 +45,7 @@ test("buildBillEntry splits a mixed-use line and credits AP for the total", () =
     expenseLines: [{ expenseAccountCode: "6060", amountCents: 10000, businessPct: 80 }],
   });
   assertBalanced(e);
-  assert.equal(e.lines.find((l) => l.accountCode === "2050")?.creditCents, 10000);
+  assert.equal(e.lines.find((l) => l.accountCode === "2080")?.creditCents, 10000);
   assert.equal(e.lines.find((l) => l.accountCode === "6060")?.debitCents, 8000);
   assert.equal(e.lines.find((l) => l.accountCode === "9500")?.debitCents, 2000);
 });

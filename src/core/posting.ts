@@ -362,14 +362,14 @@ export interface BillArgs {
   idempotencyKey: string;
   sourceTxnId?: string | null;
   expenseLines: BillExpenseLine[];
-  apAccountCode?: string; // default 2050 Accounts Payable
+  apAccountCode?: string; // default 2080 Accounts Payable
   memo?: string;
 }
 
 /**
  * Record a vendor bill (accrual; the obligation, not the payment).
  *   Dr expense account(s) (business portion) [+ Dr 9500 Personal (personal portion)]
- *   Cr 2050 Accounts Payable (total)
+ *   Cr 2080 Accounts Payable (total)
  */
 export function buildBillEntry(args: BillArgs): NewJournalEntry {
   const lines: NewJournalLine[] = [];
@@ -400,7 +400,7 @@ export function buildBillEntry(args: BillArgs): NewJournalEntry {
       });
     }
   }
-  lines.push({ accountCode: args.apAccountCode ?? "2050", debitCents: 0, creditCents: total, memo: args.memo });
+  lines.push({ accountCode: args.apAccountCode ?? "2080", debitCents: 0, creditCents: total, memo: args.memo });
   return {
     entryDate: args.entryDate,
     description: args.memo ?? "Vendor bill",

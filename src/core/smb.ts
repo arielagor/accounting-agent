@@ -240,7 +240,7 @@ export async function recordBillPayment(
     idempotencyKey: `bill:${billId}:pay:${date}:${amt}`,
     sourceTxnId: `bill:${billId}`,
     amountCents: amt,
-    toAccountCode: "2050", // Dr AP (liability decreases)
+    toAccountCode: "2080", // Dr AP (liability decreases)
     fromAccountCode, // Cr cash
     memo: `Payment for bill ${billId}`,
   });
