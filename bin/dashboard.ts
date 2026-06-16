@@ -30,6 +30,7 @@ import {
   appleCatalog,
 } from "../src/lib/app-data.js";
 import { setAppleClassification, type Bucket } from "../src/core/apple-history.js";
+import { parseOfx, parseCsv, importStatement, looksLikeOfx } from "../src/core/statements.js";
 import { upsertBudget, type PeriodKind, type BudgetScope } from "../src/core/budgets.js";
 import { generateRecommendations, setRecommendationStatus } from "../src/core/recommendations.js";
 import { resolveAccessRequest } from "../src/core/audit.js";
@@ -225,6 +226,21 @@ const server = createServer(async (req, res) => {
       const chart = await sql<{ code: string; name: string }[]>`
         SELECT code, name FROM acct_chart WHERE is_active AND type IN ('expense','cogs') ORDER BY code`;
       return json(res, 200, { ...data, chart });
+    }
+    if (req.method === "GET" && path === "/api/accounts") {
+      const rows = await sql<{ id: number; name: string | null; mask: string | null; ledger_account_code: string | null }[]>`
+        SELECT id, name, mask, ledger_account_code FROM acct_source_accounts WHERE tenant_id = ${tenant} ORDER BY id`;
+      return json(res, 200, { accounts: rows });
+    }
+    if (req.method === "POST" && path === "/api/statement") {
+      const b = await readBody(req);
+      const accountId = Number(b.accountId);
+      const textBody = String(b.text ?? "");
+      if (!accountId || !textBody.trim()) return json(res, 400, { ok: false, error: "accountId and statement text required" });
+      const txns = looksLikeOfx(textBody) ? parseOfx(textBody) : parseCsv(textBody, { flip: b.flip === true });
+      if (txns.length === 0) return json(res, 200, { ok: false, error: "parsed 0 transactions (CSV needs Date + Amount/Debit/Credit columns)" });
+      const r = await importStatement(sql, tenant, accountId, txns);
+      return json(res, 200, { ok: true, ...r });
     }
     if (req.method === "POST" && path === "/api/apple/classify") {
       const b = await readBody(req);

@@ -172,13 +172,24 @@ async function drawAdvisor(){const d=await jget('/api/advisor');
 async function genAdvisor(btn){btn.disabled=true;btn.textContent='Thinking…';await jpost('/api/advisor/generate',{period:PERIOD});draw()}
 async function reco(id,status,btn){const sp=btn.parentElement.querySelector('.ok');const r=await jpost('/api/reco/status',{id,status});if(r.ok){sp.textContent='✓';setTimeout(draw,400)}else sp.className='err',sp.textContent='✗'}
 
-async function drawReceipts(){const d=await jget('/api/receipts');
- let h='<div class="card full"><h2>Upload a receipt / statement</h2><div class="sub" style="margin-bottom:8px">Paste receipt text or CSV; the agent extracts line items and splits the matching charge (e.g. an Apple.com/Bill aggregate) to the cent.</div>'
+async function drawReceipts(){const d=await jget('/api/receipts');const ac=await jget('/api/accounts');
+ const aopts=(ac.accounts||[]).map(a=>'<option value="'+a.id+'">'+esc(a.name||('acct '+a.id))+(a.ledger_account_code?' ['+a.ledger_account_code+']':'')+'</option>').join('');
+ let h='<div class="card full"><h2>Import bank statement — years of history</h2>'
+   +'<div class="sub" style="margin-bottom:8px">SimpleFIN only gives ~90 days. Download a statement export from your bank (OFX/QFX is best; CSV works), pick the account, and paste it here. Deduped against what is already synced.</div>'
+   +'<div class="row2" style="margin-bottom:8px"><span class="sub">Account:</span><select id="sacct">'+aopts+'</select><label class="sub"><input type="checkbox" id="sflip"> CSV charges are positive (flip)</label></div>'
+   +'<textarea id="stext" placeholder="Paste OFX/QFX or CSV statement here…"></textarea>'
+   +'<div class="row2" style="margin-top:8px"><button class="primary" onclick="upStmt(this)">Import statement</button> <span id="smsg" class="ok"></span></div></div>';
+ h+='<div class="card full"><h2>Upload a receipt</h2><div class="sub" style="margin-bottom:8px">Paste receipt text or CSV; the agent extracts line items and splits the matching charge (e.g. an Apple.com/Bill aggregate) to the cent. (A full Apple purchase history is detected and imported automatically.)</div>'
    +'<textarea id="rtext" placeholder="Paste receipt text here…"></textarea><div class="row2" style="margin-top:8px"><label class="sub"><input type="checkbox" id="rcsv"> CSV</label><button class="primary" onclick="upRcpt(this)">Process</button> <span id="rmsg" class="ok"></span></div></div>';
  h+='<div class="card full"><h2>Documents ('+d.documents.length+')</h2><table><tr><th>Date</th><th>Vendor</th><th class="r">Total</th><th>Lines</th><th>Status</th></tr>'
    +d.documents.map(x=>'<tr><td class="muted">'+(x.docDate||x.createdAt)+'</td><td>'+esc(x.vendorGuess||x.sourceKind)+'</td><td class="r">'+(x.totalCents!=null?usd(x.totalCents):'—')+'</td><td>'+x.lines+'</td><td>'+statusBadge(x.status)+'</td></tr>').join('')+'</table></div>';
  $('#wrap').innerHTML=h;}
 function statusBadge(s){const m={split:'badge',matched:'badge',extracted:'badge mut',pending:'badge mut',unmatched:'badge warn',error:'badge bad',filed:'badge'};return '<span class="'+(m[s]||'badge mut')+'">'+s+'</span>'}
+async function upStmt(btn){const t=$('#stext').value;if(!t.trim())return;const accountId=Number($('#sacct').value);btn.disabled=true;btn.textContent='Importing…';
+ const r=await jpost('/api/statement',{accountId,text:t,flip:$('#sflip').checked});const m=$('#smsg');
+ if(r.ok){m.className='ok';m.textContent='✓ +'+r.added+' added, '+r.overlapWithSync+' already synced, '+r.duplicateInFile+' re-import'+(r.dateRange?' ('+r.dateRange.from+'→'+r.dateRange.to+')':'');$('#stext').value=''}
+ else{m.className='err';m.textContent='✗ '+(r.error||'failed')}
+ btn.disabled=false;btn.textContent='Import statement'}
 async function upRcpt(btn){const t=$('#rtext').value;if(!t.trim())return;btn.disabled=true;btn.textContent='Processing…';
  const r=await jpost('/api/receipts',{text:t,csv:$('#rcsv').checked});const m=$('#rmsg');
  if(r.ok&&r.mode==='apple_history'){const s=r.summary;m.className='ok';
