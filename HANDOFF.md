@@ -17,24 +17,27 @@ the foundation this builds on; its details live in git history + the GBrain proj
 7. Full SMB (AR/AP, payroll, 1099, sales tax)
 8. Netlify + Supabase; migrate Ariel's books in as encrypted tenant #1; local Postgres = dev mirror
 
-## Milestones
-- **M7** Continuous ledger + web dashboard manual edits — _pending (web app)_
-- **M8** Universal receipt ingest + auto-split — **DONE** (engine + tests)
-- **M9** Autonomous auditor + council + access-requests — _next (engine)_
-- **M10** Budgets + realtime advisory + push — _pending_
-- **M11** Full SMB — _pending_
-- **M12** Cloud multi-tenant (Supabase RLS + migrate + Netlify functions) — _pending (one-way doors queued)_
+## Milestones — ALL BUILT, TESTED, COMMITTED (2026-06-15)
+- **M7** Web app — **DONE** Multi-tab Mint-class PWA + Web Push (`bin/dashboard.ts`, `src/lib/dashboard-page.ts`, `app-data.ts`, `push.ts`). Verified live in-browser.
+- **M8** Universal receipt ingest + auto-split — **DONE** (`src/core/receipts.ts`, `audit.ts`, `buildSplitChargeEntry`, `ClaudeDocumentExtractor`)
+- **M9** Autonomous auditor + council + access-requests — **DONE** (`src/core/auditor.ts`, `ClaudeCouncil`)
+- **M10** Budgets + realtime guidance + advisory + push — **DONE** (`budgets.ts`, `guidance.ts`, `recommendations.ts`, `push.ts`)
+- **M11** Full SMB (AR/AP, payroll, 1099, sales tax) — **DONE** (`src/core/smb.ts`, posting builders, `018_smb_accounts` seed)
+- **M12** Cloud multi-tenant — **SCAFFOLDED; deploy queued for Ariel** (`supabase/migrations/0001_rls.sql`, `docs/decisions/0003-cloud-multitenancy.md`, runtimes `bin/advise.ts`/`bin/audit.ts`)
 
-## State (2026-06-15)
-- Repo `arielagor/accounting-agent`, branch `master`. Baseline pre-build: 149 tests. Now **155 tests, tsc clean**.
-- Local DB: gbrain-pg:5433 db `accounting`, 28→33 acct_ tables, 323 raw txns, 152 journal entries, 175 open review.
-- **Migrations added & applied:** `sql/007_documents.sql`, `008_budgets.sql`, `009_advisory.sql`,
-  `010_smb.sql`, `011_auditor.sql` (all additive; `npm run migrate` is idempotent).
-- **M8 engine built:** `src/core/receipts.ts` (ingest→extract→match→split), `src/core/audit.ts`
-  (logAudit + requestAccess + hasAccess), `buildSplitChargeEntry` in `src/core/posting.ts`,
-  `ClaudeDocumentExtractor` in `src/lib/llm.ts`, document types in `src/core/types.ts`.
-  Proven: a forwarded Apple receipt splits the aggregate APPLE.COM/BILL charge into components that
-  tie to the cent and clears the quarantine; an unmatchable receipt → 'unmatched' + access-request.
+## State (2026-06-15) — build complete
+- Repo `arielagor/accounting-agent`, branch `master`. Baseline 149 tests → **187 tests green, tsc --noEmit clean**.
+- Local DB: gbrain-pg:5433 db `accounting`, **34 acct_ tables**, 323 raw txns. Migrations 007–012 + seed 018 applied (idempotent).
+- New deps: `web-push` (free VAPID push). New scripts: `vapid-keys`, `audit`, `advise`.
+- **Verified live:** web app renders + tab-switches in-browser; every API endpoint returns real data; budget write
+  round-trips; `npm run advise` generated 13 grounded recommendations on the real books.
+
+## What Ariel can do right now
+- `npm run dashboard` → open the web app (token in URL #fragment when bound to 0.0.0.0). 7 tabs: Overview,
+  Transactions (inline edit/recategorize), Budgets, Advisor, Receipts, Business, Review (auditor + grant-access).
+- `npm run vapid-keys` → paste the 3 lines into `.env`, restart → tap "Alerts" in the app to get phone push.
+- `npm run advise` (schedulable) → budget alerts + fresh recommendations. `npm run audit` (CLOSE_MODE≥draft) → auditor pass.
+- Install the PWA on the phone (Add to Home Screen) for the realtime budget assistant.
 
 ## Conventions (match these)
 - TS ESM NodeNext: import sibling `.ts` as `.js`. Money = integer cents (BIGINT). `tenant_id` on every table.
@@ -50,7 +53,12 @@ the foundation this builds on; its details live in git history + the GBrain proj
   enabling the cloud ANTHROPIC_API_KEY spend; any deploy to app.agor.me; merging the agor-agents SKU PR;
   granting access-requests; approving aggressive deductions; entity-type changes; any real money movement.
 
-## Next step
-Build M9 auditor engine (`src/core/auditor.ts`) wrapping `categorize.ts`: confident → auto-post; doubtful →
-council escalation; missing data → research agent files an access-request. Write `acct_auditor_decisions` +
-`acct_audit_log` on every decision. Then M10 budgets/advisory, M11 SMB, then the web app (M7) + cloud (M12).
+## Next step (when cloud is authorized)
+The single-tenant product is complete. The remaining work is the cloud path, all gated on the one-way doors
+above. First task when provisioning is authorized: **tenant-scope the 7 reference tables**
+(chart/projects/categorization_rules/merchant_rules/allocation_rules/allocation_targets/tax_rates) — add
+`tenant_id`, backfill 'ariel', seed-per-tenant at onboarding, and filter the engine reads that join them
+(`ledger.accountIdByCode`/`projectIdBySlug`, `categorize`, `allocate`, `tax/rates`, `reports`). Keep the
+187 single-tenant tests green throughout. Then create Supabase, apply `sql/` + `supabase/migrations/0001_rls.sql`,
+migrate Ariel's rows in as encrypted tenant #1, deploy the Netlify scheduled functions, and ship. Full detail in
+`docs/decisions/0003-cloud-multitenancy.md`.
