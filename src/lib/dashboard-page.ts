@@ -63,6 +63,8 @@ th{color:var(--mut);font-weight:500}.r{text-align:right;font-variant-numeric:tab
 .bar{height:8px;border-radius:99px;background:#222732;overflow:hidden;margin-top:6px}.bar>span{display:block;height:100%;background:var(--accent)}
 .bar.over>span{background:var(--neg)}.bar.warn>span{background:var(--warn)}
 .row2{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.filebtn{display:inline-block;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:6px 10px;cursor:pointer;font-size:13px}.filebtn:hover{border-color:var(--accent)}
+textarea.drag{border-color:var(--accent)}
 .ok{color:var(--pos);font-size:12px}.err{color:var(--neg);font-size:12px}
 textarea{width:100%;min-height:120px;background:#0b0e14;color:var(--ink);border:1px solid var(--line);border-radius:8px;padding:10px;font:13px/1.5 ui-monospace,monospace}
 @media (max-width:640px){.wrap{grid-template-columns:1fr;padding:12px;gap:12px}header{padding:10px 12px}nav{padding:6px 12px;top:49px}select,button,input{padding:9px 12px;font-size:15px}td,th{padding:8px 4px}}
@@ -176,15 +178,20 @@ async function drawReceipts(){const d=await jget('/api/receipts');const ac=await
  const aopts=(ac.accounts||[]).map(a=>'<option value="'+a.id+'">'+esc(a.name||('acct '+a.id))+(a.ledger_account_code?' ['+a.ledger_account_code+']':'')+'</option>').join('');
  let h='<div class="card full"><h2>Import bank statement — years of history</h2>'
    +'<div class="sub" style="margin-bottom:8px">SimpleFIN only gives ~90 days. Download a statement export from your bank (OFX/QFX is best; CSV works), pick the account, and paste it here. Deduped against what is already synced.</div>'
-   +'<div class="row2" style="margin-bottom:8px"><span class="sub">Account:</span><select id="sacct">'+aopts+'</select><label class="sub"><input type="checkbox" id="sflip"> CSV charges are positive (flip)</label></div>'
-   +'<textarea id="stext" placeholder="Paste OFX/QFX or CSV statement here…"></textarea>'
+   +'<div class="row2" style="margin-bottom:8px"><span class="sub">Account:</span><select id="sacct">'+aopts+'</select>'
+   +'<label class="filebtn">Choose file<input type="file" accept=".qfx,.ofx,.csv,.txt" style="display:none" onchange="loadFile(this.files[0],\\'stext\\',\\'sname\\')"></label><span id="sname" class="sub muted"></span>'
+   +'<label class="sub"><input type="checkbox" id="sflip"> CSV charges are positive (flip)</label></div>'
+   +'<textarea id="stext" ondragover="event.preventDefault()" ondrop="dropFile(event,\\'stext\\',\\'sname\\')" placeholder="Drop a .qfx/.ofx/.csv file here, choose a file above, or paste the statement…"></textarea>'
    +'<div class="row2" style="margin-top:8px"><button class="primary" onclick="upStmt(this)">Import statement</button> <span id="smsg" class="ok"></span></div></div>';
- h+='<div class="card full"><h2>Upload a receipt</h2><div class="sub" style="margin-bottom:8px">Paste receipt text or CSV; the agent extracts line items and splits the matching charge (e.g. an Apple.com/Bill aggregate) to the cent. (A full Apple purchase history is detected and imported automatically.)</div>'
-   +'<textarea id="rtext" placeholder="Paste receipt text here…"></textarea><div class="row2" style="margin-top:8px"><label class="sub"><input type="checkbox" id="rcsv"> CSV</label><button class="primary" onclick="upRcpt(this)">Process</button> <span id="rmsg" class="ok"></span></div></div>';
+ h+='<div class="card full"><h2>Upload a receipt</h2><div class="sub" style="margin-bottom:8px">Drop a .txt/.csv file or paste receipt text; the agent extracts line items and splits the matching charge (e.g. an Apple.com/Bill aggregate) to the cent. (A full Apple purchase history is detected and imported automatically.)</div>'
+   +'<div class="row2" style="margin-bottom:6px"><label class="filebtn">Choose file<input type="file" accept=".txt,.csv" style="display:none" onchange="loadFile(this.files[0],\\'rtext\\',\\'rname\\')"></label><span id="rname" class="sub muted"></span></div>'
+   +'<textarea id="rtext" ondragover="event.preventDefault()" ondrop="dropFile(event,\\'rtext\\',\\'rname\\')" placeholder="Drop a file, choose one above, or paste receipt text here…"></textarea><div class="row2" style="margin-top:8px"><label class="sub"><input type="checkbox" id="rcsv"> CSV</label><button class="primary" onclick="upRcpt(this)">Process</button> <span id="rmsg" class="ok"></span></div></div>';
  h+='<div class="card full"><h2>Documents ('+d.documents.length+')</h2><table><tr><th>Date</th><th>Vendor</th><th class="r">Total</th><th>Lines</th><th>Status</th></tr>'
    +d.documents.map(x=>'<tr><td class="muted">'+(x.docDate||x.createdAt)+'</td><td>'+esc(x.vendorGuess||x.sourceKind)+'</td><td class="r">'+(x.totalCents!=null?usd(x.totalCents):'—')+'</td><td>'+x.lines+'</td><td>'+statusBadge(x.status)+'</td></tr>').join('')+'</table></div>';
  $('#wrap').innerHTML=h;}
 function statusBadge(s){const m={split:'badge',matched:'badge',extracted:'badge mut',pending:'badge mut',unmatched:'badge warn',error:'badge bad',filed:'badge'};return '<span class="'+(m[s]||'badge mut')+'">'+s+'</span>'}
+function loadFile(file,targetId,nameId){if(!file)return;const rd=new FileReader();rd.onload=()=>{const el=$('#'+targetId);if(el)el.value=rd.result;const n=$('#'+nameId);if(n)n.textContent=file.name+' ('+Math.round(file.size/1024)+' KB)';};rd.onerror=()=>{const n=$('#'+nameId);if(n){n.className='err';n.textContent='could not read file'}};rd.readAsText(file)}
+function dropFile(e,targetId,nameId){e.preventDefault();const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)loadFile(f,targetId,nameId)}
 async function upStmt(btn){const t=$('#stext').value;if(!t.trim())return;const accountId=Number($('#sacct').value);btn.disabled=true;btn.textContent='Importing…';
  const r=await jpost('/api/statement',{accountId,text:t,flip:$('#sflip').checked});const m=$('#smsg');
  if(r.ok){m.className='ok';m.textContent='✓ +'+r.added+' added, '+r.overlapWithSync+' already synced, '+r.duplicateInFile+' re-import'+(r.dateRange?' ('+r.dateRange.from+'→'+r.dateRange.to+')':'');$('#stext').value=''}
