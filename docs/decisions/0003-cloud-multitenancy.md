@@ -1,7 +1,26 @@
 # 0003 — Cloud multi-tenancy (Netlify + Supabase), tenant #1 = Ariel
 
-**Status:** scaffolded; deployment queued for Ariel (one-way doors + spend).
+**Status:** **Supabase PROVISIONED + Ariel's books migrated in as tenant #1 (2026-06-15).**
+Netlify deploy + cloud-LLM spend still queued.
 **Date:** 2026-06-15.
+
+## PROVISIONED 2026-06-15
+- Project: **agor-agents** Supabase (`REDACTED-SUPABASE-REF`, us-west-1) — reused (its `public`
+  schema was empty; accounting now lives there, namespaced `acct_` + tenant). Ariel reset the DB
+  password to authorize; stored in `.env` as `ACCT_CLOUD_DB_URL` (Session pooler,
+  `aws-1-us-west-1.pooler.supabase.com:5432`, `?sslmode=require`). Gitignored.
+- Applied via Supabase MCP: full `sql/` schema (51 `acct_` tables) + seeds + RLS
+  (`supabase/migrations/0001_rls.sql`, 38 fail-closed policies).
+- **Data migrated** local → cloud via `scripts/migrate-to-supabase.sh` (id-preserving exact
+  mirror). Verified: 50 tables / 2,223 rows / **0 mismatches**; cloud posted ledger **balances**
+  (debits=credits=8,103,494); 323 raw txns, 152 entries, 32 learned merchant rules, 13 accounts.
+- `postgres` role has `rolbypassrls=true` → the trusted server worker (connecting as postgres)
+  sees all rows + filters by tenant in app code; RLS gates only the `anon`/`authenticated` roles a
+  future per-tenant web client would use. Correct posture.
+- **Operational note:** LOCAL Postgres is still the live operational DB (the nightly
+  sync/close crons + SimpleFIN write there). Cloud is the provisioned tenant-#1 mirror. Switching
+  primary to cloud = repoint the bins/crons to `ACCT_CLOUD_DB_URL` + verify a cloud sync/close —
+  a deliberate next step, not yet done (don't change live automation unsupervised).
 
 ## Context
 
