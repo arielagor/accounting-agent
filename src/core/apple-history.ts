@@ -16,6 +16,8 @@
 import type { Sql } from "./db.js";
 import { toCents } from "./money.js";
 import { normalizeMerchant } from "./categorize.js";
+import type { ClaudeRunner } from "../lib/llm.js";
+import { extractJson } from "../lib/llm.js";
 
 const MONTHS: Record<string, string> = {
   Jan: "01", Feb: "02", Mar: "03", Apr: "04", May: "05", Jun: "06",
@@ -275,6 +277,107 @@ export async function reclassifyAppleCatalog(
           INSERT INTO acct_merchant_rules (merchant_key, account_code, project_slug, business_pct, learned_from)
           VALUES (${key}, ${c.accountCode}, ${c.projectSlug}, ${c.businessPct}, 'llm_accepted')
           ON CONFLICT (merchant_key) DO NOTHING`;
+      }
+    }
+  }
+  out.rulesLearned = learned.size;
+  return out;
+}
+
+// ─── LLM auditor for the long-tail paid review items ───────────────────────────────
+export interface AppleAuditResult {
+  processed: number;
+  business: number;
+  personal: number;
+  stillReview: number;
+  rulesLearned: number;
+  batches: number;
+}
+
+interface AuditRow { id: number; item: string; vendor: string | null; period: string | null; amount_cents: string }
+
+/**
+ * Classify the remaining PAID 'review' catalog items with the LLM, in small batches
+ * (so a huge paste can never time out). Each item is decided business (a chart code) /
+ * personal (9500) / leave-in-review, updated in place, and recurring subs learn a
+ * merchant rule. Fail-soft per batch: a bad batch is skipped, others still process.
+ */
+export async function auditAppleReview(
+  sql: Sql,
+  tenantId: string,
+  runner: ClaudeRunner,
+  batchSize = 25,
+): Promise<AppleAuditResult> {
+  const rows = await sql<AuditRow[]>`
+    SELECT id, item, vendor, period, amount_cents FROM acct_apple_purchases
+    WHERE tenant_id = ${tenantId} AND bucket = 'review' AND amount_cents > 0 ORDER BY id`;
+  const chart = await sql<{ code: string; name: string }[]>`
+    SELECT code, name FROM acct_chart WHERE is_active AND type IN ('expense','cogs') ORDER BY code`;
+  const validCodes = new Set(chart.map((c) => c.code));
+  const chartList = chart.map((c) => `  ${c.code}  ${c.name}`).join("\n");
+  const learned = new Set<string>();
+  const out: AppleAuditResult = { processed: 0, business: 0, personal: 0, stillReview: 0, rulesLearned: 0, batches: 0 };
+
+  for (let off = 0; off < rows.length; off += batchSize) {
+    const batch = rows.slice(off, off + batchSize);
+    out.batches += 1;
+    const listing = batch
+      .map((r, i) => `${i}\t${r.item} — ${r.vendor ?? ""}${r.period ? ` (${r.period})` : ""} — $${(Number(r.amount_cents) / 100).toFixed(2)}`)
+      .join("\n");
+    const prompt = [
+      "You are a CPA categorizing App Store purchases. Be terse; output only JSON.",
+      "",
+      "Classify each Apple App Store purchase below as a BUSINESS deduction or a",
+      "PERSONAL (non-deductible) expense for a solo founder who builds software + AI",
+      "products and creates content. Business = dev tools, AI/ML, SaaS, productivity,",
+      "design/creative production, hosting. Personal = entertainment, streaming, games,",
+      "dating, fitness, food, kids, travel guides, one-off movies/songs/books.",
+      "If genuinely unsure, set bucket 'review'.",
+      "",
+      "Business chart codes (pick the best fit):",
+      chartList,
+      "",
+      "Items (index<TAB>name — vendor (period) — price):",
+      listing,
+      "",
+      "Return ONLY JSON: {\"items\":[{\"i\":<index>,\"bucket\":\"business|personal|review\",",
+      "\"accountCode\":\"<code from list, or 9500 for personal, or null>\"}]}",
+    ].join("\n");
+
+    let parsed: { items?: { i: number; bucket: string; accountCode: string | null }[] };
+    try {
+      parsed = extractJson(await runner.run(prompt)) as typeof parsed;
+    } catch {
+      out.stillReview += batch.length;
+      continue; // skip this batch; leave its items in review
+    }
+    const byIndex = new Map<number, { bucket: string; accountCode: string | null }>();
+    for (const it of parsed.items ?? []) if (typeof it.i === "number") byIndex.set(it.i, { bucket: it.bucket, accountCode: it.accountCode });
+
+    for (let i = 0; i < batch.length; i++) {
+      const r = batch[i]!;
+      out.processed += 1;
+      const d = byIndex.get(i);
+      let bucket: Bucket = "review";
+      let accountCode: string | null = null;
+      if (d?.bucket === "business" && d.accountCode && validCodes.has(d.accountCode)) { bucket = "business"; accountCode = d.accountCode; }
+      else if (d?.bucket === "personal") { bucket = "personal"; accountCode = "9500"; }
+      if (bucket === "business") out.business += 1;
+      else if (bucket === "personal") out.personal += 1;
+      else { out.stillReview += 1; }
+      if (bucket !== "review") {
+        await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${accountCode} WHERE id = ${r.id}`;
+        // Learn a rule for recurring subs (period present) only.
+        if (r.period) {
+          const key = normalizeMerchant(r.vendor ?? r.item);
+          if (key && !learned.has(key)) {
+            learned.add(key);
+            await sql`
+              INSERT INTO acct_merchant_rules (merchant_key, account_code, project_slug, business_pct, learned_from)
+              VALUES (${key}, ${accountCode}, ${bucket === "business" ? "shared" : "personal"}, ${bucket === "business" ? 100 : 0}, 'llm_accepted')
+              ON CONFLICT (merchant_key) DO NOTHING`;
+          }
+        }
       }
     }
   }

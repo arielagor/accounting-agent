@@ -47,7 +47,7 @@ const RUN_TIMEOUT_MS = 60_000;
  *     no orphaned cmd.exe shim — the proven pattern for killing claude -p cleanly).
  *   - stdout is collected and resolved as a string; bounded by RUN_TIMEOUT_MS.
  */
-export function spawnClaudeRunner(): ClaudeRunner {
+export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS): ClaudeRunner {
   return {
     run(prompt: string): Promise<string> {
       return new Promise<string>((resolve, reject) => {
@@ -86,8 +86,8 @@ export function spawnClaudeRunner(): ClaudeRunner {
           } catch {
             // Best-effort kill; if it fails the reject below still settles the promise.
           }
-          reject(new Error(`claude -p timed out after ${RUN_TIMEOUT_MS}ms`));
-        }, RUN_TIMEOUT_MS);
+          reject(new Error(`claude -p timed out after ${timeoutMs}ms`));
+        }, timeoutMs);
 
         child.stdout.on("data", (chunk: Buffer) => {
           stdout += chunk.toString("utf8");
