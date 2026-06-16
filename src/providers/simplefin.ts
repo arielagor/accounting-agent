@@ -29,12 +29,20 @@ const NINETY_DAYS_SECONDS = 90 * 24 * 60 * 60;
 /** Shape of the SimpleFIN /accounts response we consume (only the fields we use). */
 interface SimpleFinTxnJson {
   id: string;
-  posted: number; // unix seconds
+  posted: number; // unix seconds (0/absent until the txn clears)
+  transacted_at?: number; // unix seconds — when it occurred (present even while pending)
   amount: string; // signed decimal dollar string
   description?: string;
   pending?: boolean;
   payee?: string;
   category?: string;
+}
+
+/** Best transaction date in unix seconds: `posted` when set, else `transacted_at`. */
+function bestTxnSeconds(t: SimpleFinTxnJson): number | null {
+  if (Number.isFinite(t.posted) && t.posted > 0) return t.posted;
+  if (Number.isFinite(t.transacted_at) && (t.transacted_at as number) > 0) return t.transacted_at as number;
+  return null;
 }
 
 interface SimpleFinAccountJson {
@@ -87,11 +95,12 @@ export function parseSimpleFinAccounts(json: unknown): {
     const txns = Array.isArray(acct.transactions) ? acct.transactions : [];
     for (const t of txns) {
       const pending = t.pending === true;
+      const sec = bestTxnSeconds(t);
       transactions.push({
         providerTxnId: t.id,
         amountCents: toCents(t.amount), // signed: negative = outflow
         currency,
-        postedDate: Number.isFinite(t.posted) ? unixSecondsToYmd(t.posted) : null,
+        postedDate: sec !== null ? unixSecondsToYmd(sec) : null,
         authorizedDate: null, // SimpleFIN exposes only `posted`
         pending,
         description: t.description ?? "",
