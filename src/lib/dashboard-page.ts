@@ -180,6 +180,10 @@ async function drawReceipts(){const d=await jget('/api/receipts');
 function statusBadge(s){const m={split:'badge',matched:'badge',extracted:'badge mut',pending:'badge mut',unmatched:'badge warn',error:'badge bad',filed:'badge'};return '<span class="'+(m[s]||'badge mut')+'">'+s+'</span>'}
 async function upRcpt(btn){const t=$('#rtext').value;if(!t.trim())return;btn.disabled=true;btn.textContent='Processing…';
  const r=await jpost('/api/receipts',{text:t,csv:$('#rcsv').checked});const m=$('#rmsg');
+ if(r.ok&&r.mode==='apple_history'){const s=r.summary;m.className='ok';
+   m.innerHTML='✓ Imported '+s.orders+' Apple orders, '+s.items+' items '+(s.dateRange?'('+s.dateRange.from+'→'+s.dateRange.to+')':'')+'. '
+   +'<b>'+s.businessItems+'</b> business ('+usd0(s.businessSpentCents)+'), '+s.personalItems+' personal, '+s.reviewItems+' to review · '+s.rulesLearned+' rules learned.';
+   $('#rtext').value='';btn.disabled=false;btn.textContent='Process';return}
  if(r.ok){m.className='ok';m.textContent='✓ '+(r.stage==='split'&&r.result&&r.result.posted?'split posted':r.stage)+' (doc '+r.documentId+')';setTimeout(draw,700)}else{m.className='err';m.textContent='✗ '+(r.error||'failed');btn.disabled=false;btn.textContent='Process'}}
 
 async function drawSmb(){const d=await jget('/api/smb');

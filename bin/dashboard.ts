@@ -33,6 +33,7 @@ import { generateRecommendations, setRecommendationStatus } from "../src/core/re
 import { resolveAccessRequest } from "../src/core/audit.js";
 import { auditReviewQueue } from "../src/core/auditor.js";
 import { ingestDocument, processDocument } from "../src/core/receipts.js";
+import { importAppleHistory, looksLikeAppleHistory } from "../src/core/apple-history.js";
 import { spawnClaudeRunner, ClaudeCouncil, ClaudeDocumentExtractor } from "../src/lib/llm.js";
 import { vapidFromEnv, saveSubscription, sendToTenant } from "../src/lib/push.js";
 import { PAGE, SW_JS, MANIFEST, ICON_SVG } from "../src/lib/dashboard-page.js";
@@ -188,6 +189,11 @@ const server = createServer(async (req, res) => {
       const b = await readBody(req);
       const textBody = String(b.text ?? "");
       if (!textBody.trim()) return json(res, 400, { ok: false, error: "receipt text required" });
+      // Bulk Apple purchase-history export → deterministic parser (no LLM, instant).
+      if (looksLikeAppleHistory(textBody)) {
+        const summary = await importAppleHistory(sql, tenant, textBody);
+        return json(res, 200, { ok: true, mode: "apple_history", summary });
+      }
       const sourceKind = b.csv ? "csv" : "email";
       const ing = await ingestDocument(sql, tenant, { sourceKind, bytesOrText: textBody, origin: String(b.origin ?? "manual upload") });
       const extractor = new ClaudeDocumentExtractor(spawnClaudeRunner());
