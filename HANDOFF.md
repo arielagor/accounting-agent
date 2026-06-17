@@ -26,18 +26,38 @@ the foundation this builds on; its details live in git history + the GBrain proj
 - **M12** Cloud multi-tenant — **Supabase PROVISIONED + books migrated as tenant #1 (2026-06-15).** agor-agents Supabase (`REDACTED-SUPABASE-REF`), schema+seeds+RLS applied, data mirrored via `scripts/migrate-to-supabase.sh` (50 tables/2,223 rows/0 mismatches, cloud ledger balances). `ACCT_CLOUD_DB_URL` in `.env`. Netlify deploy + cloud-LLM spend still queued. LOCAL stays the live operational DB (crons + SimpleFIN write there); repoint-to-cloud is the deliberate next step.
 - **SimpleFIN LIVE (confirmed 2026-06-15):** 13 real accounts linked + mapped, syncing clean (last sync added 8/modified 313, 0 errors). The original Phase-1 bank-link blocker is RESOLVED — the engine runs on real data.
 
-## State (2026-06-15) — build complete
-- Repo `arielagor/accounting-agent`, branch `master`. Baseline 149 tests → **187 tests green, tsc --noEmit clean**.
-- Local DB: gbrain-pg:5433 db `accounting`, **34 acct_ tables**, 323 raw txns. Migrations 007–012 + seed 018 applied (idempotent).
-- New deps: `web-push` (free VAPID push). New scripts: `vapid-keys`, `audit`, `advise`.
-- **Verified live:** web app renders + tab-switches in-browser; every API endpoint returns real data; budget write
-  round-trips; `npm run advise` generated 13 grounded recommendations on the real books.
+## State (2026-06-17) — build complete + data importers + tax-optimize
+- Repo `arielagor/accounting-agent`, branch `master`, HEAD **`71fd656`**. **211 tests green, tsc --noEmit clean.**
+- Local DB: gbrain-pg:5433 db `accounting`, **~50 acct_ tables**. Migrations 007–015 + seeds 018–019 applied (idempotent).
+- New deps: `web-push` (free VAPID push). New scripts: `vapid-keys`, `audit`, `advise`, `import-statement`.
+- **Since 2026-06-15:**
+  - **Apple purchase-history import** (`src/core/apple-history.ts`, migrations 013/014): deterministic parser
+    (no LLM — the LLM path 60s-timed-out on 14 years), business/personal/**free** buckets, an LLM auditor that
+    sorted the 98 paid review items (27 business / 54 personal / 17 review), and a catalog review UI that
+    **teaches the system** (manual choice → learned merchant rule, checked first at 0.99).
+  - **Bank-statement importer** (`src/core/statements.ts`, CLI `npm run import-statement`): deterministic
+    OFX/QFX + CSV, two-layer dedup against the SimpleFIN feed — the path to deep history because **SimpleFIN
+    caps at ~90 days** (start-date does NOT defeat it). File picker + drag-drop wired in the Receipts tab.
+  - **Fixed the SimpleFIN 1970-date bug** (`bestTxnSeconds()` transacted_at fallback for `posted=0`).
+  - **Tax-optimize uncertain categorizations (2026-06-17, migration 015, `docs/decisions/0004`):** when the
+    auditor is genuinely unsure about an otherwise-safe txn it books the most tax-beneficial DEFENSIBLE account
+    (`ordinary` > `meals_50` > `capital` > `personal`) among the council's candidates instead of parking it for
+    a human. Audit-sensitive accounts (6900 vehicle, 6950 home office) are never auto-picked; the hard gates
+    (aggressive deduction, needs-access, large amount, own $2,500 cap) still escalate. Reversible + re-learns
+    from any override. Flag `AUDITOR_TAX_OPTIMIZE` (default on; `0` reverts); cap `AUDITOR_TAX_OPTIMIZE_MAX_CENTS`.
+    Also fixed `DEFAULT_SENSITIVE` which had referenced non-existent codes (6300/6310).
+- **Verified live:** web app renders + tab-switches in-browser; tax-optimize proven by DB-backed tests that post
+  to the real ledger + exercise every guard; `npm run advise` generated 13 grounded recommendations on real books.
 
 ## What Ariel can do right now
 - `npm run dashboard` → open the web app (token in URL #fragment when bound to 0.0.0.0). 7 tabs: Overview,
   Transactions (inline edit/recategorize), Budgets, Advisor, Receipts, Business, Review (auditor + grant-access).
 - `npm run vapid-keys` → paste the 3 lines into `.env`, restart → tap "Alerts" in the app to get phone push.
-- `npm run advise` (schedulable) → budget alerts + fresh recommendations. `npm run audit` (CLOSE_MODE≥draft) → auditor pass.
+- `npm run advise` (schedulable) → budget alerts + fresh recommendations. `npm run audit` (CLOSE_MODE≥draft) →
+  auditor pass; with `AUDITOR_TAX_OPTIMIZE=1` (default) it tax-optimizes unsure items instead of parking them.
+  The "Run auditor" button in the Review tab does the same and reports the tax-optimized count.
+- `npm run import-statement -- --file <ofx|qfx|csv> --account <id|ledgerCode|mask|name> [--flip] [--map ...]`
+  → load years of history per account (deduped against SimpleFIN). Or use the Receipts tab's Import panel.
 - Install the PWA on the phone (Add to Home Screen) for the realtime budget assistant.
 
 ## Conventions (match these)
