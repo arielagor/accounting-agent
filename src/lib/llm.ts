@@ -28,6 +28,7 @@ import type {
   ExtractedLine,
   CouncilEscalator,
   CouncilVerdict,
+  AccountCandidate,
 } from "../core/types.js";
 import { personaPreamble } from "../core/persona.js";
 
@@ -434,15 +435,24 @@ export class ClaudeCouncil implements CouncilEscalator {
       "set humanGate and do NOT resolve. If you genuinely need data you don't have (e.g.",
       "an itemized receipt, access to a specific account), set needsAccess and do NOT resolve.",
       "",
+      "Even when you are NOT confident enough to resolve, still give your best single",
+      "accountCode AND a short `candidates` list of every DEFENSIBLE account this could",
+      "reasonably be (best first). List only categories a reasonable accountant would",
+      "actually stand behind for this transaction — never an aggressive or implausible one.",
+      "These candidates may be auto-selected, so do not pad the list.",
+      "",
       "Return ONLY a JSON object (no prose, no code fences) with exactly these keys:",
       "  resolved    (boolean; true only for a confident, safe categorization)",
-      "  accountCode (string code above, or null)",
+      "  accountCode (string code above, or null) — your best single pick",
       "  projectSlug (slug above, or null)",
       "  businessPct (integer 0..100)",
       "  confidence  (number 0..1)",
       "  rationale   (one short sentence summarizing the council's reasoning)",
       "  humanGate   (string reason if a human must decide, else null)",
       "  needsAccess (object {resource, reason, howToGrant} if data is needed, else null)",
+      "  candidates  (array of { accountCode (string code above), businessPct (integer",
+      "               0..100), rationale (short string) } — every DEFENSIBLE option, best",
+      "               first; [] only if truly none applies)",
     ].join("\n");
   }
 
@@ -479,6 +489,7 @@ export class ClaudeCouncil implements CouncilEscalator {
         };
       }
     }
+    const candidates = parseCandidates(obj.candidates);
     return {
       resolved: obj.resolved === true && accountCode !== null && !humanGate && !needsAccess,
       accountCode,
@@ -488,8 +499,31 @@ export class ClaudeCouncil implements CouncilEscalator {
       rationale: typeof obj.rationale === "string" ? obj.rationale : "",
       humanGate,
       needsAccess,
+      candidates,
     };
   }
+}
+
+/**
+ * Parse the council's optional `candidates` array into clean AccountCandidate records,
+ * dropping any malformed entry. Fail-soft: a bad value yields [] rather than throwing.
+ */
+function parseCandidates(value: unknown): AccountCandidate[] {
+  if (!Array.isArray(value)) return [];
+  const out: AccountCandidate[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const o = item as Record<string, unknown>;
+    const code = typeof o.accountCode === "string" ? o.accountCode.trim() : "";
+    if (!code) continue;
+    const cand: AccountCandidate = { accountCode: code };
+    if (typeof o.businessPct === "number" && Number.isFinite(o.businessPct)) {
+      cand.businessPct = clampPct(o.businessPct);
+    }
+    if (typeof o.rationale === "string" && o.rationale.trim()) cand.rationale = o.rationale.trim();
+    out.push(cand);
+  }
+  return out;
 }
 
 /** Render an unknown thrown value as a short string for the rationale. */

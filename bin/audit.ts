@@ -31,13 +31,24 @@ async function main(): Promise<void> {
   }
   const tenant = env.TENANT_ID ?? "ariel";
   const confidenceThreshold = Number(env.CONFIDENCE_THRESHOLD ?? 0.85);
+  // Tax-optimize uncertain items by default (Ariel 2026-06-17): when the auditor is unsure
+  // it books the most tax-beneficial defensible account instead of parking it for a human.
+  // Set AUDITOR_TAX_OPTIMIZE=0 to revert; AUDITOR_TAX_OPTIMIZE_MAX_CENTS caps the amount.
+  const taxOptimizeUncertain = (env.AUDITOR_TAX_OPTIMIZE ?? "1") !== "0";
+  const taxOptimizeMaxCents = env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS
+    ? Number(env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS)
+    : undefined;
   const sql = openSql(env.ACCT_DB_URL);
   try {
     const council = new ClaudeCouncil(spawnClaudeRunner());
-    const r = await auditReviewQueue(sql, tenant, council, { confidenceThreshold });
+    const r = await auditReviewQueue(sql, tenant, council, {
+      confidenceThreshold,
+      taxOptimizeUncertain,
+      taxOptimizeMaxCents,
+    });
     log(
-      `audit: processed=${r.processed} auto-posted=${r.autoPosted} escalated=${r.escalated} ` +
-        `awaiting-access=${r.deferred} still-quarantined=${r.quarantined}`,
+      `audit: processed=${r.processed} auto-posted=${r.autoPosted} (tax-optimized=${r.taxOptimized}) ` +
+        `escalated=${r.escalated} awaiting-access=${r.deferred} still-quarantined=${r.quarantined}`,
     );
   } catch (e) {
     error("audit failed:", e instanceof Error ? e.message : String(e));

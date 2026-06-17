@@ -380,6 +380,19 @@ export interface DocumentExtractor {
  * access to data it needs (a research agent's structured request). It can also come
  * back unresolved, in which case the txn stays quarantined for a human.
  */
+/**
+ * One defensible account the council considered for a transaction. The council returns
+ * a short list of these so that, when it is NOT confident enough to resolve, the auditor
+ * can still pick the most tax-beneficial *reasonable* option (per Ariel 2026-06-17) rather
+ * than parking the item for a human — choosing only among accounts the council itself
+ * vouched as defensible.
+ */
+export interface AccountCandidate {
+  accountCode: string;
+  businessPct?: number;
+  rationale?: string;
+}
+
 export interface CouncilVerdict {
   resolved: boolean;
   accountCode?: string | null;
@@ -391,6 +404,9 @@ export interface CouncilVerdict {
   needsAccess?: { resource: string; reason: string; howToGrant: string } | null;
   /** A hard human-in-the-loop gate (e.g. "aggressive home-office %"); never auto-acted. */
   humanGate?: string | null;
+  /** Defensible alternatives the council considered, best-first. Used only by the
+   *  tax-optimize path when the council could not resolve confidently. */
+  candidates?: AccountCandidate[];
 }
 
 /** Pluggable council escalator (injected so the auditor is testable with a mock). */
@@ -405,7 +421,16 @@ export type AuditorVerdict =
   | "deferred_access"
   | "overridden";
 
-export type AuditorBasis = "rule" | "learned" | "llm" | "council" | "research" | "human";
+export type AuditorBasis =
+  | "rule"
+  | "learned"
+  | "llm"
+  | "council"
+  | "research"
+  | "human"
+  /** The auditor was unsure but, rather than park it for a human, picked the most
+   *  tax-beneficial defensible account among the council's candidates. */
+  | "tax_optimized";
 
 export interface AuditorDecision {
   sourceTxnId: string;

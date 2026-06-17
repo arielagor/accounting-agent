@@ -37,6 +37,18 @@ test("ClaudeCouncil parses a confident resolution", async () => {
   assert.equal(v.confidence, 0.95);
 });
 
+test("ClaudeCouncil parses candidates for the tax-optimize path", async () => {
+  const council = new ClaudeCouncil({
+    async run() {
+      return '{"resolved":false,"accountCode":"6130","businessPct":100,"confidence":0.5,"rationale":"maybe a meal","humanGate":null,"needsAccess":null,"candidates":[{"accountCode":"6130","businessPct":100,"rationale":"restaurant"},{"accountCode":"6070","businessPct":100}]}';
+    },
+  });
+  const v = await council.deliberate(txnInput, ctx);
+  assert.equal(v.candidates?.length, 2);
+  assert.equal(v.candidates?.[0]?.accountCode, "6130");
+  assert.equal(v.candidates?.[1]?.accountCode, "6070");
+});
+
 test("ClaudeCouncil forces resolved=false when a human-gate is present", async () => {
   const council = new ClaudeCouncil({
     async run() {
@@ -91,7 +103,7 @@ async function clean(): Promise<void> {
   await sql`DELETE FROM acct_auditor_decisions WHERE tenant_id = ${TENANT}`;
   await sql`DELETE FROM acct_access_requests WHERE tenant_id = ${TENANT}`;
   await sql`DELETE FROM acct_audit_log WHERE tenant_id = ${TENANT}`;
-  await sql`DELETE FROM acct_merchant_rules WHERE merchant_key IN ('ambiguous vendor','sensitive vendor','huge vendor')`;
+  await sql`DELETE FROM acct_merchant_rules WHERE merchant_key IN ('ambiguous vendor','sensitive vendor','huge vendor','office or meal')`;
   await sql`DELETE FROM acct_transactions_raw WHERE tenant_id = ${TENANT}`;
   await sql`DELETE FROM acct_source_accounts WHERE tenant_id = ${TENANT}`;
   await sql`DELETE FROM acct_connections WHERE tenant_id = ${TENANT}`;
@@ -121,6 +133,11 @@ async function seed(): Promise<void> {
   rawIds.gate = await addTxn(card!.id, "HOME DEPOT", -8000, "t-gate");
   rawIds.sensitive = await addTxn(card!.id, "SENSITIVE VENDOR", -3000, "t-sens");
   rawIds.huge = await addTxn(card!.id, "HUGE VENDOR", -900_000, "t-huge");
+  // Tax-optimize fixtures: a small uncertain item, an uncertain item whose council
+  // primary is a sensitive account, and a mid-size item above the optimizer's own cap.
+  rawIds.optimize = await addTxn(card!.id, "OFFICE OR MEAL", -3500, "t-opt");
+  rawIds.optSensitive = await addTxn(card!.id, "MAYBE HOME OFFICE", -2200, "t-optsens");
+  rawIds.optBig = await addTxn(card!.id, "BIG UNSURE BUY", -300_000, "t-optbig");
 }
 
 before(async () => {
@@ -215,7 +232,8 @@ test("a sensitive account is escalated even when the council is confident", asyn
     sql,
     TENANT,
     src,
-    fixedCouncil({ resolved: true, accountCode: "6310", businessPct: 100, confidence: 0.99, rationale: "vehicle" }),
+    // 6900 = Business Use of Car (mileage) — a real audit-sensitive chart code.
+    fixedCouncil({ resolved: true, accountCode: "6900", businessPct: 100, confidence: 0.99, rationale: "vehicle" }),
     CONFIG,
   );
   assert.equal(d.verdict, "escalated", "sensitive account guard fires regardless of confidence");
@@ -232,6 +250,107 @@ test("a large charge is escalated even when the council is confident", async (t)
     CONFIG,
   );
   assert.equal(d.verdict, "escalated", "large-amount guard fires");
+});
+
+// ─── Tax-optimize: unsure → most tax-beneficial defensible account (Ariel 2026-06-17) ──
+const TAX_CONFIG: AuditorConfig = { ...CONFIG, taxOptimizeUncertain: true };
+
+test("tax-optimize ON: an unsure verdict books the most tax-beneficial defensible account", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  const src = `raw:${rawIds.optimize}`;
+  const d = await auditOne(
+    sql,
+    TENANT,
+    src,
+    fixedCouncil({
+      resolved: false,
+      accountCode: "6130", // council's primary read: Meals (50%)
+      businessPct: 100,
+      confidence: 0.5, // below threshold → "unsure"
+      rationale: "could be a working meal or office supplies",
+      candidates: [{ accountCode: "6130" }, { accountCode: "6070" }], // meal vs office (ordinary)
+    }),
+    TAX_CONFIG,
+  );
+  assert.equal(d.verdict, "auto_posted");
+  assert.equal(d.basis, "tax_optimized");
+  assert.equal(d.accountCode, "6070", "ordinary office expense (100%) beats a 50% meal");
+
+  const posted = await sql<{ n: string }[]>`
+    SELECT count(*) n FROM acct_journal_entries WHERE tenant_id = ${TENANT} AND source_txn_id = ${src} AND status = 'posted'`;
+  assert.equal(Number(posted[0]!.n), 1, "tax-optimized entry posted");
+  const open = await sql<{ n: string }[]>`
+    SELECT count(*) n FROM acct_review_queue WHERE source_txn_id = ${src} AND status = 'open'`;
+  assert.equal(Number(open[0]!.n), 0, "quarantine cleared");
+  // Also proves migration 015 widened the basis CHECK to allow 'tax_optimized'.
+  const dec = await sql<{ n: string }[]>`
+    SELECT count(*) n FROM acct_auditor_decisions WHERE tenant_id = ${TENANT} AND source_txn_id = ${src} AND basis = 'tax_optimized'`;
+  assert.equal(Number(dec[0]!.n), 1, "tax_optimized decision recorded");
+});
+
+test("tax-optimize OFF (default): an unsure verdict still parks the item for a human", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  // Re-audit the access item with an unsure verdict under the default (flag-off) config.
+  const src = `raw:${rawIds.gate}`; // already escalated earlier via humanGate; re-audit unsure
+  const d = await auditOne(
+    sql,
+    TENANT,
+    src,
+    fixedCouncil({
+      resolved: false,
+      accountCode: "6070",
+      confidence: 0.5,
+      rationale: "unsure",
+      candidates: [{ accountCode: "6070" }],
+    }),
+    CONFIG, // taxOptimizeUncertain not set → off
+  );
+  assert.equal(d.verdict, "quarantined", "flag off preserves the human-review behavior");
+  const posted = await sql<{ n: string }[]>`
+    SELECT count(*) n FROM acct_journal_entries WHERE tenant_id = ${TENANT} AND source_txn_id = ${src} AND status = 'posted'`;
+  assert.equal(Number(posted[0]!.n), 0, "nothing posted when the flag is off");
+});
+
+test("tax-optimize ON: a sensitive council primary still escalates, never auto-optimized", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  const src = `raw:${rawIds.optSensitive}`;
+  const d = await auditOne(
+    sql,
+    TENANT,
+    src,
+    fixedCouncil({
+      resolved: false,
+      accountCode: "6950", // primary read is Home Office (sensitive)
+      businessPct: 90,
+      confidence: 0.5,
+      rationale: "looks like home office, maybe just office supplies",
+      candidates: [{ accountCode: "6950" }, { accountCode: "6070" }],
+    }),
+    TAX_CONFIG,
+  );
+  assert.equal(d.verdict, "escalated", "an aggressive primary forces a human even with tax-optimize on");
+  const posted = await sql<{ n: string }[]>`
+    SELECT count(*) n FROM acct_journal_entries WHERE tenant_id = ${TENANT} AND source_txn_id = ${src} AND status = 'posted'`;
+  assert.equal(Number(posted[0]!.n), 0, "nothing posted for a sensitive primary");
+});
+
+test("tax-optimize ON: a charge at/above the optimizer cap stays human-gated", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  const src = `raw:${rawIds.optBig}`; // -$3,000: below the large-amount gate, at/above the optimizer cap
+  const d = await auditOne(
+    sql,
+    TENANT,
+    src,
+    fixedCouncil({
+      resolved: false,
+      accountCode: "6070",
+      confidence: 0.5,
+      rationale: "big but unsure",
+      candidates: [{ accountCode: "6070" }],
+    }),
+    { ...TAX_CONFIG, taxOptimizeMaxCents: 250_000 },
+  );
+  assert.equal(d.verdict, "quarantined", "the optimizer's own cap keeps a $3k uncertain item with a human");
 });
 
 test("auditReviewQueue tallies the remaining open items", async (t) => {

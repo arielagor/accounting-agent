@@ -239,7 +239,7 @@ async function drawReview(){const d=await jget('/api/review?period='+PERIOD);CHA
  $('#wrap').innerHTML=h;}
 async function resolveQ(btn){const tr=btn.closest('tr');const r=await jpost('/api/resolve',{sourceTxnId:tr.dataset.id,accountCode:tr.querySelector('select').value});
  const sp=tr.querySelector('.ok');if(r.ok){sp.textContent='✓ posted';setTimeout(()=>tr.remove(),500)}else{sp.className='err';sp.textContent='✗ '+(r.reason||r.error)}}
-async function runAudit(btn){btn.disabled=true;btn.textContent='Auditing…';const r=await jpost('/api/audit/run',{});if(r.ok){alert('Auditor: '+r.summary.autoPosted+' auto-posted, '+r.summary.escalated+' escalated, '+r.summary.deferred+' awaiting access, '+r.summary.quarantined+' still need you.')}draw()}
+async function runAudit(btn){btn.disabled=true;btn.textContent='Auditing…';const r=await jpost('/api/audit/run',{});if(r.ok){var to=r.summary.taxOptimized||0;var opt=to?(' ('+to+' tax-optimized — re-categorize any in Transactions to correct + teach it)'):'';alert('Auditor: '+r.summary.autoPosted+' auto-posted'+opt+', '+r.summary.escalated+' escalated, '+r.summary.deferred+' awaiting access, '+r.summary.quarantined+' still need you.')}draw()}
 async function grant(id,decision,btn){const r=await jpost('/api/access',{id,decision});const sp=btn.parentElement.querySelector('.ok');if(r.ok){sp.textContent='✓';setTimeout(draw,400)}else{sp.className='err';sp.textContent='✗'}}
 
 // ── Push ─────────────────────────────────────────────────────────────────────

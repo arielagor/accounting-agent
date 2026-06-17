@@ -15,6 +15,7 @@
  */
 import type { Sql } from "./db.js";
 import type {
+  AccountCandidate,
   AuditorBasis,
   AuditorDecision,
   CategorizationInput,
@@ -24,6 +25,7 @@ import type {
 } from "./types.js";
 import { applyManualCategorization } from "./resolve.js";
 import { logAudit, requestAccess } from "./audit.js";
+import { pickTaxOptimal, type AccountTaxInfo } from "./tax-benefit.js";
 import { log } from "../lib/log.js";
 
 export interface AuditorConfig {
@@ -33,13 +35,31 @@ export interface AuditorConfig {
   sensitiveAccountCodes?: Set<string>;
   /** Charges at/above this always require a human (large-amount gate). 0 disables. */
   humanGateAmountCents?: number;
+  /**
+   * When true, an item the auditor is UNSURE about (council unresolved or below the
+   * confidence threshold) is NOT parked for a human: the auditor instead books the most
+   * tax-beneficial *defensible* account among the council's candidates (Ariel 2026-06-17).
+   * The hard gates (aggressive/sensitive accounts, large amounts, needs-access, council
+   * human-gate) are never overridden by this — they still escalate. Default off so the
+   * core stays conservative; Ariel's runtime turns it on.
+   */
+  taxOptimizeUncertain?: boolean;
+  /**
+   * The tax-optimize path will only auto-book an uncertain item BELOW this amount; at or
+   * above it the item still goes to a human even with tax-optimize on. Its own cap so a
+   * large uncertain charge is never silently optimized when the global large-amount gate
+   * (humanGateAmountCents) is disabled. Default $2,500.
+   */
+  taxOptimizeMaxCents?: number;
 }
 
-const DEFAULT_SENSITIVE = new Set<string>([
-  "6300", // Home office (8829) — % is a classic audit flag
-  "6310", // Vehicle / mileage — 100% business is rarely defensible
-  "6900", // Meals — already 50%, but large entertainment claims escalate
-]);
+const DEFAULT_TAX_OPTIMIZE_MAX_CENTS = 250_000; // $2,500
+
+// Audit-sensitive accounts: aggressive-deduction territory, never auto-posted and never
+// chosen by the tax-optimizer. Codes match the live chart (sql/seed/010_chart_of_accounts):
+//   6900 Business Use of Car (mileage) — 100% business is rarely defensible (Sch C line 9)
+//   6950 Home Office (Form 8829)       — the business-use % is a classic audit flag (line 30)
+const DEFAULT_SENSITIVE = new Set<string>(["6900", "6950"]);
 
 interface RawTxn {
   rawId: number;
@@ -133,12 +153,26 @@ export async function auditOne(
   };
 
   const [chart, projects] = await Promise.all([
-    sql<{ code: string; name: string; type: string }[]>`
-      SELECT code, name, type FROM acct_chart WHERE is_active ORDER BY code`,
+    sql<{ code: string; name: string; type: string; tax_treatment: string; is_business: boolean }[]>`
+      SELECT code, name, type, tax_treatment, is_business FROM acct_chart WHERE is_active ORDER BY code`,
     sql<{ slug: string; name: string }[]>`
       SELECT slug, name FROM acct_projects WHERE status = 'active' ORDER BY slug`,
   ]);
   const validCodes = new Set(chart.map((c) => c.code));
+  // Tax facts keyed by code, for the tax-optimize path (no extra query).
+  const chartTax = new Map<string, AccountTaxInfo>(
+    chart.map((c) => [
+      c.code,
+      {
+        code: c.code,
+        name: c.name,
+        type: c.type as AccountType,
+        taxTreatment: c.tax_treatment as AccountTaxInfo["taxTreatment"],
+        isBusiness: c.is_business,
+        isActive: true, // query already filters is_active
+      },
+    ]),
+  );
 
   let verdict: CouncilVerdict;
   try {
@@ -232,6 +266,47 @@ export async function auditOne(
             ? "large charge requires a human"
             : "below confidence threshold";
     const escalated = tooSensitive || tooLarge;
+
+    // Tax-optimize (Ariel 2026-06-17): when we are merely UNSURE — never on a hard gate
+    // (sensitive account, large amount, council human-gate, needs-access already returned
+    // above) — and the charge is below the optimizer's own cap, book the most tax-
+    // beneficial *defensible* account among the council's candidates instead of parking
+    // it for a human. The pick is always a reasonable, non-aggressive expense category,
+    // is recorded with basis 'tax_optimized', and is fully reversible from the Review tab.
+    const taxMax = config.taxOptimizeMaxCents ?? DEFAULT_TAX_OPTIMIZE_MAX_CENTS;
+    if (config.taxOptimizeUncertain && !escalated && Math.abs(txn.amountCents) < taxMax) {
+      const pool: AccountCandidate[] = [];
+      if (chosen !== null) {
+        pool.push({ accountCode: chosen, businessPct: verdict.businessPct, rationale: verdict.rationale });
+      }
+      for (const c of verdict.candidates ?? []) pool.push(c);
+      const pick = pickTaxOptimal(pool, chartTax, sensitive);
+      if (pick) {
+        const bp = clampPct(pick.businessPct);
+        const posted = await applyManualCategorization(sql, tenantId, sourceTxnId, pick.accountCode, bp, true, "llm");
+        const rationale = `tax-optimized (auditor unsure: ${reason}). ${pick.reasoning}. council: ${verdict.rationale}`;
+        const d: AuditorDecision = {
+          sourceTxnId,
+          verdict: posted.alreadyPosted ? "overridden" : "auto_posted",
+          basis: "tax_optimized",
+          accountCode: pick.accountCode,
+          confidence: verdict.confidence,
+          rationale,
+        };
+        await recordDecision(sql, tenantId, d, verdict.projectSlug ?? null, bp, verdict.rationale);
+        await logAudit(sql, tenantId, "auditor", "tax_optimized_post", sourceTxnId, {
+          accountCode: pick.accountCode,
+          businessPct: bp,
+          treatment: pick.treatment,
+          benefit: pick.benefit,
+          unsureReason: reason,
+          candidates: pool.map((p) => p.accountCode),
+        });
+        log("auditor: tax-optimized", sourceTxnId, "->", pick.accountCode, `(${pick.treatment}, benefit ${pick.benefit})`);
+        return d;
+      }
+    }
+
     const d: AuditorDecision = {
       sourceTxnId,
       verdict: escalated ? "escalated" : "quarantined",
@@ -278,6 +353,8 @@ export async function auditOne(
 export interface AuditBatchResult {
   processed: number;
   autoPosted: number;
+  /** Subset of autoPosted that the tax-optimizer booked while the auditor was unsure. */
+  taxOptimized: number;
   escalated: number;
   deferred: number;
   quarantined: number;
@@ -308,6 +385,7 @@ export async function auditReviewQueue(
   const result: AuditBatchResult = {
     processed: 0,
     autoPosted: 0,
+    taxOptimized: 0,
     escalated: 0,
     deferred: 0,
     quarantined: 0,
@@ -317,8 +395,10 @@ export async function auditReviewQueue(
     const d = await auditOne(sql, tenantId, it.source_txn_id, council, config);
     result.processed += 1;
     result.decisions.push(d);
-    if (d.verdict === "auto_posted" || d.verdict === "overridden") result.autoPosted += 1;
-    else if (d.verdict === "escalated") result.escalated += 1;
+    if (d.verdict === "auto_posted" || d.verdict === "overridden") {
+      result.autoPosted += 1;
+      if (d.basis === "tax_optimized") result.taxOptimized += 1;
+    } else if (d.verdict === "escalated") result.escalated += 1;
     else if (d.verdict === "deferred_access") result.deferred += 1;
     else result.quarantined += 1;
   }

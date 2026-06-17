@@ -55,6 +55,11 @@ const host = env.DASHBOARD_HOST ?? "127.0.0.1";
 const token = env.DASHBOARD_TOKEN ?? "";
 const vapid = vapidFromEnv(process.env);
 const confidenceThreshold = Number(env.CONFIDENCE_THRESHOLD ?? 0.85);
+// Tax-optimize uncertain items by default (Ariel 2026-06-17); AUDITOR_TAX_OPTIMIZE=0 reverts.
+const taxOptimizeUncertain = (env.AUDITOR_TAX_OPTIMIZE ?? "1") !== "0";
+const taxOptimizeMaxCents = env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS
+  ? Number(env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS)
+  : undefined;
 
 if (host !== "127.0.0.1" && host !== "localhost" && !token) {
   error(`refusing to bind ${host} without DASHBOARD_TOKEN — set a token or bind 127.0.0.1`);
@@ -210,8 +215,12 @@ const server = createServer(async (req, res) => {
     }
     if (req.method === "POST" && path === "/api/audit/run") {
       const council = new ClaudeCouncil(spawnClaudeRunner());
-      const r = await auditReviewQueue(sql, tenant, council, { confidenceThreshold });
-      return json(res, 200, { ok: true, ...r, decisions: undefined, summary: { processed: r.processed, autoPosted: r.autoPosted, escalated: r.escalated, deferred: r.deferred, quarantined: r.quarantined } });
+      const r = await auditReviewQueue(sql, tenant, council, {
+        confidenceThreshold,
+        taxOptimizeUncertain,
+        taxOptimizeMaxCents,
+      });
+      return json(res, 200, { ok: true, ...r, decisions: undefined, summary: { processed: r.processed, autoPosted: r.autoPosted, taxOptimized: r.taxOptimized, escalated: r.escalated, deferred: r.deferred, quarantined: r.quarantined } });
     }
     if (req.method === "POST" && path === "/api/access") {
       const b = await readBody(req);
