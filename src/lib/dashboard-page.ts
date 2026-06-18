@@ -206,19 +206,29 @@ async function upRcpt(btn){const t=$('#rtext').value;if(!t.trim())return;btn.dis
  if(r.ok){m.className='ok';m.textContent='✓ '+(r.stage==='split'&&r.result&&r.result.posted?'split posted':r.stage)+' (doc '+r.documentId+')';setTimeout(draw,700)}else{m.className='err';m.textContent='✗ '+(r.error||'failed');btn.disabled=false;btn.textContent='Process'}}
 
 async function drawApple(){const d=await jget('/api/apple');
- const opts=(d.chart||[]).map(c=>'<option value="'+c.code+'">'+c.code+' '+esc(c.name)+'</option>').join('');
+ const optsFor=(code)=>(d.chart||[]).map(c=>'<option value="'+c.code+'"'+(c.code===code?' selected':'')+'>'+c.code+' '+esc(c.name)+'</option>').join('');
+ const opts=optsFor(null);
  const sm={}; (d.summary||[]).forEach(s=>sm[s.bucket]=s);
  const card=(label,b,cls)=>'<div class="card"><h2>'+label+'</h2><div class="kpi '+(cls||'')+'">'+(sm[b]?sm[b].n:0)+'</div><div class="sub">'+(sm[b]?usd(sm[b].cents):'$0.00')+'</div></div>';
  let h=card('Business','business','pos')+card('Personal','personal','')+card('Free apps','free','muted')+card('To review','review','warnc');
  h+='<div class="card full"><h2>Apple items to review ('+(d.review?d.review.length:0)+') — your choice teaches the system</h2>'
-   +'<div class="sub" style="margin-bottom:8px">Each pick files it AND learns a merchant rule, so that vendor auto-categorizes in your bank feed from now on.</div>';
+   +'<div class="sub" style="margin-bottom:8px">Each pick files it AND learns a merchant rule, so that vendor auto-categorizes in your bank feed from now on. <button onclick="runAppleAudit(this)">Run Apple auditor</button> <span class="muted">— leans genuine toss-ups to the deductible business category; clear-personal items stay personal.</span></div>';
  if(!d.review||!d.review.length)h+='<div class="muted">Nothing left to review 🎉</div>';
  else h+='<table><tr><th>Date</th><th>Item</th><th class="r">Amt</th><th>Business as…</th><th></th></tr>'
    +d.review.map(r=>'<tr class="arow" data-id="'+r.id+'"><td class="muted">'+(r.date||'')+'</td><td>'+esc(r.item)+'<div class="sub muted">'+esc(r.vendor||'')+'</div></td><td class="r">'+usd(r.amountCents)+'</td>'
      +'<td><select class="acode">'+opts+'</select></td>'
      +'<td class="row2"><button onclick="classApple(this,\\'business\\')">Business</button><button onclick="classApple(this,\\'personal\\')">Personal</button> <span class="ok"></span></td></tr>').join('')+'</table>';
  h+='</div>';
+ if(d.leaned&&d.leaned.length){
+   h+='<div class="card full"><h2>Auto-leaned to business ('+d.leaned.length+') — confirm or flip</h2>'
+     +'<div class="sub" style="margin-bottom:8px">Genuine toss-ups the agent booked as a deduction. No merchant rule is learned until you confirm, and you can flip any to personal.</div>'
+     +'<table><tr><th>Date</th><th>Item</th><th class="r">Amt</th><th>Business as…</th><th></th></tr>'
+     +d.leaned.map(r=>'<tr class="arow" data-id="'+r.id+'"><td class="muted">'+(r.date||'')+'</td><td>'+esc(r.item)+'<div class="sub muted">'+esc(r.vendor||'')+'</div></td><td class="r">'+usd(r.amountCents)+'</td>'
+       +'<td><select class="acode">'+optsFor(r.accountCode)+'</select></td>'
+       +'<td class="row2"><button onclick="classApple(this,\\'business\\')">Keep business</button><button onclick="classApple(this,\\'personal\\')">Make personal</button> <span class="ok"></span></td></tr>').join('')+'</table></div>';
+ }
  $('#wrap').innerHTML=h;}
+async function runAppleAudit(btn){btn.disabled=true;btn.textContent='Auditing…';const r=await jpost('/api/apple/audit',{});if(r.ok){var lb=r.leanedBusiness||0;alert('Apple auditor: '+r.business+' business'+(lb?(' ('+lb+' leaned toss-ups — confirm/flip below)'):'')+', '+r.personal+' personal, '+r.stillReview+' still need you.')}else{alert('Apple audit failed')}drawApple()}
 async function classApple(btn,bucket){const tr=btn.closest('tr');const id=Number(tr.dataset.id);const code=bucket==='business'?tr.querySelector('.acode').value:null;
  btn.disabled=true;const r=await jpost('/api/apple/classify',{id,bucket,accountCode:code});const sp=tr.querySelector('.ok');
  if(r.ok){sp.className='ok';sp.textContent='✓ '+bucket+(r.learnedVendor?' · learned':'');setTimeout(()=>tr.remove(),500)}else{sp.className='err';sp.textContent='✗';btn.disabled=false}}

@@ -46,6 +46,12 @@ the foundation this builds on; its details live in git history + the GBrain proj
     (aggressive deduction, needs-access, large amount, own $2,500 cap) still escalate. Reversible + re-learns
     from any override. Flag `AUDITOR_TAX_OPTIMIZE` (default on; `0` reverts); cap `AUDITOR_TAX_OPTIMIZE_MAX_CENTS`.
     Also fixed `DEFAULT_SENSITIVE` which had referenced non-existent codes (6300/6310).
+  - **Apple reviewer lean (2026-06-18, migration 016):** the SAME flag now also makes the Apple catalog
+    reviewer (`auditAppleReview`) lean genuine toss-ups to BUSINESS (deductible) instead of parking them
+    in 'review' — clearly-personal stays personal; leaned items are flagged `auto_leaned`, surfaced under
+    "Auto-leaned to business — confirm or flip" in the Apple tab, and DON'T learn a merchant rule until a
+    human confirms. `auditAppleReview` is now wired to a "Run Apple auditor" button via
+    `POST /api/apple/audit` (previously ad-hoc only).
 - **Verified live:** web app renders + tab-switches in-browser; tax-optimize proven by DB-backed tests that post
   to the real ledger + exercise every guard; `npm run advise` generated 13 grounded recommendations on real books.
 

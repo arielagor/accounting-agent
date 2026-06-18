@@ -3,9 +3,18 @@
  * paid orders, multi-item orders, Free items, period/refund metadata, and the
  * business/personal/review classification.
  */
-import { test } from "node:test";
+import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { parseAppleHistory, classifyAppleItem, looksLikeAppleHistory } from "../src/core/apple-history.js";
+import { join } from "node:path";
+import {
+  parseAppleHistory,
+  classifyAppleItem,
+  looksLikeAppleHistory,
+  auditAppleReview,
+} from "../src/core/apple-history.js";
+import { normalizeMerchant } from "../src/core/categorize.js";
+import { openSql, type Sql } from "../src/core/db.js";
+import { loadEnv } from "../src/lib/env.js";
 
 const SAMPLE = `Jun 14, 2026
 MT8ZLX0SX6
@@ -96,4 +105,105 @@ test("classifyAppleItem routes AI/dev tools to business and entertainment to per
 test("looksLikeAppleHistory detects the bulk export shape", () => {
   assert.equal(looksLikeAppleHistory(SAMPLE), true);
   assert.equal(looksLikeAppleHistory("just a normal receipt for $5.00 at a coffee shop"), false);
+});
+
+// ─── DB-backed: the lean-to-business Apple reviewer (Ariel 2026-06-17) ────────────────
+const env = loadEnv(join(process.cwd(), ".env"));
+const url = env.ACCT_DB_URL ?? "postgresql://postgres:local-dev-password@localhost:5433/accounting";
+const TENANT = "test_apple_lean";
+const VENDORS = { ambig: "AmbigCo", game: "GameCo", mystery: "MysteryCo", dev: "DevCo" };
+
+// A mock runner that returns a fixed verdict for the 4 seeded rows (indices 0..3),
+// including a `tossup` flag — ignored unless the reviewer runs in lean mode.
+const mockRunner = {
+  async run() {
+    return JSON.stringify({
+      items: [
+        { i: 0, bucket: "business", accountCode: "6150", tossup: true }, // a leaned toss-up
+        { i: 1, bucket: "personal", accountCode: "9500" },
+        { i: 2, bucket: "review", accountCode: null }, // truly can't tell → stays
+        { i: 3, bucket: "business", accountCode: "6160", tossup: false }, // confident business
+      ],
+    });
+  },
+};
+
+let sql: Sql;
+let dbUp = false;
+
+async function seedApple(): Promise<void> {
+  await sql`DELETE FROM acct_apple_purchases WHERE tenant_id = ${TENANT}`;
+  await sql`DELETE FROM acct_merchant_rules WHERE merchant_key IN (${normalizeMerchant(VENDORS.ambig)}, ${normalizeMerchant(VENDORS.dev)})`;
+  const rows: [string, string, string | null][] = [
+    [VENDORS.ambig, "Ambiguous Pro Tool", "Renews Jul 1, 2026"],
+    [VENDORS.game, "Some Game", null],
+    [VENDORS.mystery, "Mystery Thing", null],
+    [VENDORS.dev, "Clear Dev SaaS", "Renews Jul 1, 2026"],
+  ];
+  let ln = 1;
+  for (const [vendor, item, period] of rows) {
+    await sql`
+      INSERT INTO acct_apple_purchases
+        (tenant_id, order_id, order_date, line_no, item, vendor, period, amount_cents, order_total_cents, bucket, account_code)
+      VALUES (${TENANT}, 'apple-test', '2026-05-01', ${ln}, ${item}, ${vendor}, ${period}, 999, 999, 'review', NULL)`;
+    ln += 1;
+  }
+}
+
+before(async () => {
+  sql = openSql(url);
+  try {
+    await sql`SELECT 1`;
+    dbUp = true;
+  } catch {
+    dbUp = false;
+  }
+});
+
+after(async () => {
+  if (dbUp) {
+    await sql`DELETE FROM acct_apple_purchases WHERE tenant_id = ${TENANT}`;
+    await sql`DELETE FROM acct_merchant_rules WHERE merchant_key IN (${normalizeMerchant(VENDORS.ambig)}, ${normalizeMerchant(VENDORS.dev)})`;
+  }
+  await sql.end({ timeout: 5 });
+});
+
+test("auditAppleReview LEAN mode books a defensible toss-up as business and flags it", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  await seedApple();
+  const r = await auditAppleReview(sql, TENANT, mockRunner, 25, true);
+  assert.equal(r.business, 2, "the toss-up + the confident one both land business");
+  assert.equal(r.personal, 1);
+  assert.equal(r.stillReview, 1, "the truly-unsure item stays in review");
+  assert.equal(r.leanedBusiness, 1, "only the tossup item counts as leaned");
+
+  const got = await sql<{ vendor: string; bucket: string; auto_leaned: boolean }[]>`
+    SELECT vendor, bucket, auto_leaned FROM acct_apple_purchases WHERE tenant_id = ${TENANT} ORDER BY line_no`;
+  const by = Object.fromEntries(got.map((g) => [g.vendor, g]));
+  assert.equal(by[VENDORS.ambig]!.bucket, "business");
+  assert.equal(by[VENDORS.ambig]!.auto_leaned, true, "leaned toss-up is flagged for review");
+  assert.equal(by[VENDORS.dev]!.bucket, "business");
+  assert.equal(by[VENDORS.dev]!.auto_leaned, false, "a confident classification is not a lean");
+  assert.equal(by[VENDORS.mystery]!.bucket, "review");
+
+  // A leaned toss-up must NOT harden into a merchant rule; a confident one does.
+  const ambigRule = await sql<{ n: string }[]>`SELECT count(*) n FROM acct_merchant_rules WHERE merchant_key = ${normalizeMerchant(VENDORS.ambig)}`;
+  assert.equal(Number(ambigRule[0]!.n), 0, "no rule learned for a leaned toss-up until a human confirms");
+  const devRule = await sql<{ n: string }[]>`SELECT count(*) n FROM acct_merchant_rules WHERE merchant_key = ${normalizeMerchant(VENDORS.dev)}`;
+  assert.equal(Number(devRule[0]!.n), 1, "confident recurring business sub still learns a rule");
+});
+
+test("auditAppleReview OFF (default): no lean, no auto_leaned flag, toss-up learns a rule", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  await seedApple();
+  const r = await auditAppleReview(sql, TENANT, mockRunner, 25, false);
+  assert.equal(r.leanedBusiness, 0, "nothing is 'leaned' when the flag is off");
+  const got = await sql<{ vendor: string; bucket: string; auto_leaned: boolean }[]>`
+    SELECT vendor, bucket, auto_leaned FROM acct_apple_purchases WHERE tenant_id = ${TENANT} ORDER BY line_no`;
+  const by = Object.fromEntries(got.map((g) => [g.vendor, g]));
+  // The mock still returns business for the toss-up, but it is not marked leaned…
+  assert.equal(by[VENDORS.ambig]!.auto_leaned, false);
+  // …and because it isn't a lean, the recurring sub learns a rule as before.
+  const ambigRule = await sql<{ n: string }[]>`SELECT count(*) n FROM acct_merchant_rules WHERE merchant_key = ${normalizeMerchant(VENDORS.ambig)}`;
+  assert.equal(Number(ambigRule[0]!.n), 1, "flag off preserves the original learn-on-confident-classify behavior");
 });

@@ -194,9 +194,20 @@ export interface SmbSummary {
 }
 
 // ─── Apple purchase catalog ────────────────────────────────────────────────────────
+export interface AppleCatalogItem {
+  id: number;
+  item: string;
+  vendor: string | null;
+  period: string | null;
+  amountCents: number;
+  date: string;
+  accountCode?: string | null;
+}
 export interface AppleCatalog {
   summary: { bucket: string; n: number; cents: number }[];
-  review: { id: number; item: string; vendor: string | null; period: string | null; amountCents: number; date: string }[];
+  review: AppleCatalogItem[];
+  /** Toss-ups the reviewer LEANED to business — surfaced so they can be confirmed/flipped. */
+  leaned: AppleCatalogItem[];
 }
 
 export async function appleCatalog(sql: Sql, tenant: string): Promise<AppleCatalog> {
@@ -211,7 +222,13 @@ export async function appleCatalog(sql: Sql, tenant: string): Promise<AppleCatal
       FROM acct_apple_purchases WHERE tenant_id = ${tenant} AND bucket = 'review' AND amount_cents > 0
       ORDER BY amount_cents DESC LIMIT 200`
   ).map((r) => ({ id: r.id, item: r.item, vendor: r.vendor, period: r.period, amountCents: D(r.amount_cents), date: r.d }));
-  return { summary, review };
+  const leaned = (
+    await sql<{ id: number; item: string; vendor: string | null; period: string | null; amount_cents: string; account_code: string | null; d: string }[]>`
+      SELECT id, item, vendor, period, amount_cents, account_code, to_char(order_date,'YYYY-MM-DD') d
+      FROM acct_apple_purchases WHERE tenant_id = ${tenant} AND auto_leaned = true
+      ORDER BY amount_cents DESC LIMIT 200`
+  ).map((r) => ({ id: r.id, item: r.item, vendor: r.vendor, period: r.period, amountCents: D(r.amount_cents), date: r.d, accountCode: r.account_code }));
+  return { summary, review, leaned };
 }
 
 export async function smbSummary(sql: Sql, tenant: string, asOfISO: string): Promise<SmbSummary> {

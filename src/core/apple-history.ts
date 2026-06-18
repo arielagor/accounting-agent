@@ -290,6 +290,8 @@ export interface AppleAuditResult {
   business: number;
   personal: number;
   stillReview: number;
+  /** Subset of `business` the reviewer LEANED from a genuine toss-up (lean mode only). */
+  leanedBusiness: number;
   rulesLearned: number;
   batches: number;
 }
@@ -301,12 +303,21 @@ interface AuditRow { id: number; item: string; vendor: string | null; period: st
  * (so a huge paste can never time out). Each item is decided business (a chart code) /
  * personal (9500) / leave-in-review, updated in place, and recurring subs learn a
  * merchant rule. Fail-soft per batch: a bad batch is skipped, others still process.
+ *
+ * When `leanBusiness` is true (Ariel 2026-06-17 — the Apple analogue of the transaction
+ * auditor's tax-optimize), a GENUINE TOSS-UP with a defensible business use is classified
+ * BUSINESS (the deductible outcome) and flagged `auto_leaned` for easy review, instead of
+ * being parked in 'review'. The guardrail is "defensible only": clearly-personal items
+ * still go personal, and anything the model truly can't place still stays in review. These
+ * review items are exactly the ambiguous tail (the deterministic keyword lists already
+ * pulled out the clear business/personal cases), so the lean applies only to real toss-ups.
  */
 export async function auditAppleReview(
   sql: Sql,
   tenantId: string,
   runner: ClaudeRunner,
   batchSize = 25,
+  leanBusiness = false,
 ): Promise<AppleAuditResult> {
   const rows = await sql<AuditRow[]>`
     SELECT id, item, vendor, period, amount_cents FROM acct_apple_purchases
@@ -316,7 +327,20 @@ export async function auditAppleReview(
   const validCodes = new Set(chart.map((c) => c.code));
   const chartList = chart.map((c) => `  ${c.code}  ${c.name}`).join("\n");
   const learned = new Set<string>();
-  const out: AppleAuditResult = { processed: 0, business: 0, personal: 0, stillReview: 0, rulesLearned: 0, batches: 0 };
+  const out: AppleAuditResult = { processed: 0, business: 0, personal: 0, stillReview: 0, leanedBusiness: 0, rulesLearned: 0, batches: 0 };
+
+  // The "unsure" rule + JSON schema differ between conservative and lean modes.
+  const unsureRule = leanBusiness
+    ? [
+        "IMPORTANT: when an item is a GENUINE TOSS-UP and a reasonable business use exists",
+        "for this founder, classify it BUSINESS with the best chart code (favor the",
+        "deductible categorization) and set tossup=true. Classify PERSONAL only when it is",
+        "CLEARLY personal. Use 'review' ONLY if you truly cannot tell and cannot pick a code.",
+      ]
+    : ["If genuinely unsure, set bucket 'review'."];
+  const schemaLine = leanBusiness
+    ? "\"accountCode\":\"<code from list, or 9500 for personal, or null>\",\"tossup\":<true|false>}]}"
+    : "\"accountCode\":\"<code from list, or 9500 for personal, or null>\"}]}";
 
   for (let off = 0; off < rows.length; off += batchSize) {
     const batch = rows.slice(off, off + batchSize);
@@ -332,7 +356,7 @@ export async function auditAppleReview(
       "products and creates content. Business = dev tools, AI/ML, SaaS, productivity,",
       "design/creative production, hosting. Personal = entertainment, streaming, games,",
       "dating, fitness, food, kids, travel guides, one-off movies/songs/books.",
-      "If genuinely unsure, set bucket 'review'.",
+      ...unsureRule,
       "",
       "Business chart codes (pick the best fit):",
       chartList,
@@ -341,18 +365,18 @@ export async function auditAppleReview(
       listing,
       "",
       "Return ONLY JSON: {\"items\":[{\"i\":<index>,\"bucket\":\"business|personal|review\",",
-      "\"accountCode\":\"<code from list, or 9500 for personal, or null>\"}]}",
+      schemaLine,
     ].join("\n");
 
-    let parsed: { items?: { i: number; bucket: string; accountCode: string | null }[] };
+    let parsed: { items?: { i: number; bucket: string; accountCode: string | null; tossup?: boolean }[] };
     try {
       parsed = extractJson(await runner.run(prompt)) as typeof parsed;
     } catch {
       out.stillReview += batch.length;
       continue; // skip this batch; leave its items in review
     }
-    const byIndex = new Map<number, { bucket: string; accountCode: string | null }>();
-    for (const it of parsed.items ?? []) if (typeof it.i === "number") byIndex.set(it.i, { bucket: it.bucket, accountCode: it.accountCode });
+    const byIndex = new Map<number, { bucket: string; accountCode: string | null; tossup?: boolean }>();
+    for (const it of parsed.items ?? []) if (typeof it.i === "number") byIndex.set(it.i, { bucket: it.bucket, accountCode: it.accountCode, tossup: it.tossup });
 
     for (let i = 0; i < batch.length; i++) {
       const r = batch[i]!;
@@ -362,13 +386,17 @@ export async function auditAppleReview(
       let accountCode: string | null = null;
       if (d?.bucket === "business" && d.accountCode && validCodes.has(d.accountCode)) { bucket = "business"; accountCode = d.accountCode; }
       else if (d?.bucket === "personal") { bucket = "personal"; accountCode = "9500"; }
-      if (bucket === "business") out.business += 1;
+      // A leaned item: a toss-up the reviewer pushed to business under lean mode.
+      const leaned = leanBusiness && bucket === "business" && d?.tossup === true;
+      if (bucket === "business") { out.business += 1; if (leaned) out.leanedBusiness += 1; }
       else if (bucket === "personal") out.personal += 1;
       else { out.stillReview += 1; }
       if (bucket !== "review") {
-        await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${accountCode} WHERE id = ${r.id}`;
-        // Learn a rule for recurring subs (period present) only.
-        if (r.period) {
+        await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${accountCode}, auto_leaned = ${leaned} WHERE id = ${r.id}`;
+        // Learn a rule for recurring subs (period present) only — but NOT for a leaned
+        // toss-up: a hedged business call shouldn't harden into an authoritative rule
+        // before a human confirms it. Confident (non-leaned) classifications still learn.
+        if (r.period && !leaned) {
           const key = normalizeMerchant(r.vendor ?? r.item);
           if (key && !learned.has(key)) {
             learned.add(key);
@@ -403,7 +431,8 @@ export async function setAppleClassification(
     SELECT item, vendor FROM acct_apple_purchases WHERE id = ${id} AND tenant_id = ${tenantId}`;
   if (rows.length === 0) return { ok: false };
   const code = bucket === "personal" ? "9500" : accountCode;
-  await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${code} WHERE id = ${id} AND tenant_id = ${tenantId}`;
+  // A human decision supersedes any auto-lean → clear the flag.
+  await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${code}, auto_leaned = false WHERE id = ${id} AND tenant_id = ${tenantId}`;
 
   let learnedVendor: string | undefined;
   if ((bucket === "business" || bucket === "personal") && code) {

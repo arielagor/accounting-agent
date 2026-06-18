@@ -97,9 +97,35 @@ excludes sensitive accounts by code, so the set has to match the chart.
   cleared quarantine + `tax_optimized` basis accepted by migration `015`; flag-off still
   parks; sensitive primary still escalates; over-cap stays human-gated).
 
+## Extension — the Apple catalog reviewer (2026-06-18)
+
+Ariel asked for the same lean on the **Apple purchase-history reviewer** ("Apple reviewer
+too"). That reviewer's axis is business-vs-personal (business = deductible) rather than
+chart-account selection, so the lean is shaped to fit while keeping the same
+defensible-only guardrail:
+
+- `auditAppleReview(..., leanBusiness)` (governed by the **same** `AUDITOR_TAX_OPTIMIZE`
+  flag). When on, a **genuine toss-up with a reasonable business use** is classified
+  BUSINESS (the deductible outcome) and flagged `auto_leaned`; **clearly-personal items
+  still go personal**, and anything the model truly can't place still stays in `review`.
+- The items reaching this reviewer are already the ambiguous tail — the deterministic
+  keyword lists pulled out the clear business/personal cases first — so the lean only ever
+  touches real toss-ups.
+- **A leaned toss-up does NOT learn a merchant rule** (unlike a confident classification);
+  a hedged call must not harden into an authoritative rule until a human confirms it.
+- Leaned items surface in the Apple tab under "Auto-leaned to business — confirm or flip,"
+  each one-click confirmable (keep business) or reversible (make personal); a human
+  decision clears the `auto_leaned` flag. `sql/016` adds the column. The "Run Apple
+  auditor" button (newly wired) reports how many toss-ups were leaned.
+
 ## Files
 
 - `sql/015_auditor_tax_optimized.sql` — widen the `basis` CHECK to allow `tax_optimized`.
+- `sql/016_apple_auto_leaned.sql` — `auto_leaned` flag on the Apple catalog.
+- `src/core/apple-history.ts` — `leanBusiness` mode, `auto_leaned`, leaned-no-learn guard.
+- `src/lib/app-data.ts` — `appleCatalog` surfaces the leaned list.
+- `bin/dashboard.ts` — `/api/apple/audit` (wired; same flag); `src/lib/dashboard-page.ts`
+  — "Run Apple auditor" button + leaned review section.
 - `src/core/tax-benefit.ts` — pure ranking + `pickTaxOptimal`.
 - `src/core/auditor.ts` — config flags, corrected sensitive set, tax-optimize path, tally.
 - `src/core/types.ts` — `AccountCandidate`, `CouncilVerdict.candidates`, `tax_optimized` basis.

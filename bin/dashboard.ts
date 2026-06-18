@@ -29,7 +29,7 @@ import {
   smbSummary,
   appleCatalog,
 } from "../src/lib/app-data.js";
-import { setAppleClassification, type Bucket } from "../src/core/apple-history.js";
+import { setAppleClassification, auditAppleReview, type Bucket } from "../src/core/apple-history.js";
 import { parseOfx, parseCsv, importStatement, looksLikeOfx } from "../src/core/statements.js";
 import { upsertBudget, type PeriodKind, type BudgetScope } from "../src/core/budgets.js";
 import { generateRecommendations, setRecommendationStatus } from "../src/core/recommendations.js";
@@ -258,6 +258,11 @@ const server = createServer(async (req, res) => {
         b.accountCode ? String(b.accountCode) : null,
       );
       return json(res, 200, r);
+    }
+    if (req.method === "POST" && path === "/api/apple/audit") {
+      // Same toggle as the transaction auditor: lean genuine toss-ups to business when on.
+      const r = await auditAppleReview(sql, tenant, spawnClaudeRunner(), 25, taxOptimizeUncertain);
+      return json(res, 200, { ok: true, ...r });
     }
     if (req.method === "POST" && path === "/api/push/subscribe") {
       const b = await readBody(req);
