@@ -267,7 +267,9 @@ export async function reclassifyAppleCatalog(
     const bucket = bucketFor(amount, amount === 0, c.bucket);
     const accountCode = bucket === "free" ? null : c.accountCode;
     out[bucket] += 1;
-    await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${accountCode} WHERE id = ${r.id}`;
+    // Deterministic reclassify supersedes any prior auto-lean → clear the flag so a row
+    // reverting to 'review' can't linger in the "auto-leaned to business" list.
+    await sql`UPDATE acct_apple_purchases SET bucket = ${bucket}, account_code = ${accountCode}, auto_leaned = false WHERE id = ${r.id}`;
     out.updated += 1;
     if (bucket !== "free" && bucket !== "review" && c.accountCode && validCodes.has(c.accountCode) && amount > 0 && r.period) {
       const key = normalizeMerchant(r.vendor ?? r.item);
