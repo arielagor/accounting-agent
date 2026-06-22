@@ -23,7 +23,7 @@ the foundation this builds on; its details live in git history + the GBrain proj
 - **M9** Autonomous auditor + council + access-requests — **DONE** (`src/core/auditor.ts`, `ClaudeCouncil`)
 - **M10** Budgets + realtime guidance + advisory + push — **DONE** (`budgets.ts`, `guidance.ts`, `recommendations.ts`, `push.ts`)
 - **M11** Full SMB (AR/AP, payroll, 1099, sales tax) — **DONE** (`src/core/smb.ts`, posting builders, `018_smb_accounts` seed)
-- **M12** Cloud multi-tenant — **Supabase PROVISIONED + books migrated as tenant #1 (2026-06-15).** agor-agents Supabase (`REDACTED-SUPABASE-REF`), schema+seeds+RLS applied, data mirrored via `scripts/migrate-to-supabase.sh` (50 tables/2,223 rows/0 mismatches, cloud ledger balances). `ACCT_CLOUD_DB_URL` in `.env`. Netlify deploy + cloud-LLM spend still queued. LOCAL stays the live operational DB (crons + SimpleFIN write there); repoint-to-cloud is the deliberate next step.
+- **M12** Cloud multi-tenant — **Supabase PROVISIONED + books migrated as tenant #1 (2026-06-15).** agor-agents Supabase project (ref in `.env`), schema+seeds+RLS applied, data mirrored via `scripts/migrate-to-supabase.sh` (50 tables/2,223 rows/0 mismatches, cloud ledger balances). `ACCT_CLOUD_DB_URL` in `.env`. Netlify deploy + cloud-LLM spend still queued. LOCAL stays the live operational DB (crons + SimpleFIN write there); repoint-to-cloud is the deliberate next step.
 - **SimpleFIN LIVE (confirmed 2026-06-15):** 13 real accounts linked + mapped, syncing clean (last sync added 8/modified 313, 0 errors). The original Phase-1 bank-link blocker is RESOLVED — the engine runs on real data.
 
 ## State (2026-06-17) — build complete + data importers + tax-optimize

@@ -5,7 +5,7 @@ Netlify deploy + cloud-LLM spend still queued.
 **Date:** 2026-06-15.
 
 ## PROVISIONED 2026-06-15
-- Project: **agor-agents** Supabase (`REDACTED-SUPABASE-REF`, us-west-1) — reused (its `public`
+- Project: **agor-agents** Supabase project (ref + region in `.env`) — reused (its `public`
   schema was empty; accounting now lives there, namespaced `acct_` + tenant). Ariel reset the DB
   password to authorize; stored in `.env` as `ACCT_CLOUD_DB_URL` (Session pooler,
   `aws-1-us-west-1.pooler.supabase.com:5432`, `?sslmode=require`). Gitignored.
