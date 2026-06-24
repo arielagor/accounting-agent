@@ -103,7 +103,7 @@ async function clean(): Promise<void> {
   await sql`DELETE FROM acct_auditor_decisions WHERE tenant_id = ${TENANT}`;
   await sql`DELETE FROM acct_access_requests WHERE tenant_id = ${TENANT}`;
   await sql`DELETE FROM acct_audit_log WHERE tenant_id = ${TENANT}`;
-  await sql`DELETE FROM acct_merchant_rules WHERE merchant_key IN ('ambiguous vendor','sensitive vendor','huge vendor','office or meal')`;
+  await sql`DELETE FROM acct_merchant_rules WHERE merchant_key IN ('ambiguous vendor','sensitive vendor','huge vendor','office or meal','typei signal','typei defer')`;
   await sql`DELETE FROM acct_transactions_raw WHERE tenant_id = ${TENANT}`;
   await sql`DELETE FROM acct_source_accounts WHERE tenant_id = ${TENANT}`;
   await sql`DELETE FROM acct_connections WHERE tenant_id = ${TENANT}`;
@@ -138,6 +138,9 @@ async function seed(): Promise<void> {
   rawIds.optimize = await addTxn(card!.id, "OFFICE OR MEAL", -3500, "t-opt");
   rawIds.optSensitive = await addTxn(card!.id, "MAYBE HOME OFFICE", -2200, "t-optsens");
   rawIds.optBig = await addTxn(card!.id, "BIG UNSURE BUY", -300_000, "t-optbig");
+  // Type-I aversion fixtures: a business-vs-personal coin flip (defer) and one with signal.
+  rawIds.typeIdefer = await addTxn(card!.id, "TYPEI DEFER", -1800, "t-tid");
+  rawIds.typeIsignal = await addTxn(card!.id, "TYPEI SIGNAL", -1900, "t-tis");
 }
 
 before(async () => {
@@ -351,6 +354,52 @@ test("tax-optimize ON: a charge at/above the optimizer cap stays human-gated", a
     { ...TAX_CONFIG, taxOptimizeMaxCents: 250_000 },
   );
   assert.equal(d.verdict, "quarantined", "the optimizer's own cap keeps a $3k uncertain item with a human");
+});
+
+test("Type-I aversion: a low-confidence deduction over a personal option is LEFT for a human", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  const src = `raw:${rawIds.typeIdefer}`;
+  const d = await auditOne(
+    sql,
+    TENANT,
+    src,
+    fixedCouncil({
+      resolved: false,
+      accountCode: "6150", // business (deductible)
+      businessPct: 100,
+      confidence: 0.5, // coin-flip, below the 0.6 lean floor
+      rationale: "might be a business tool, might be personal",
+      candidates: [{ accountCode: "6150" }, { accountCode: "9500" }], // business vs personal
+    }),
+    { ...TAX_CONFIG, taxLeanConfidenceFloor: 0.6 },
+  );
+  assert.equal(d.verdict, "quarantined", "the deduction is not grabbed on a coin flip");
+  assert.match(d.rationale, /low-confidence deduction left for review/);
+  const posted = await sql<{ n: string }[]>`
+    SELECT count(*) n FROM acct_journal_entries WHERE tenant_id = ${TENANT} AND source_txn_id = ${src} AND status = 'posted'`;
+  assert.equal(Number(posted[0]!.n), 0, "nothing booked");
+});
+
+test("Type-I aversion: WITH business-purpose signal (>= floor) the deduction IS taken", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  const src = `raw:${rawIds.typeIsignal}`;
+  const d = await auditOne(
+    sql,
+    TENANT,
+    src,
+    fixedCouncil({
+      resolved: false,
+      accountCode: "6150",
+      businessPct: 100,
+      confidence: 0.7, // above the 0.6 lean floor → real signal
+      rationale: "reads as a dev tool",
+      candidates: [{ accountCode: "6150" }, { accountCode: "9500" }],
+    }),
+    { ...TAX_CONFIG, taxLeanConfidenceFloor: 0.6 },
+  );
+  assert.equal(d.verdict, "auto_posted");
+  assert.equal(d.basis, "tax_optimized");
+  assert.equal(d.accountCode, "6150");
 });
 
 test("auditReviewQueue tallies the remaining open items", async (t) => {

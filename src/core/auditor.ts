@@ -51,7 +51,20 @@ export interface AuditorConfig {
    * (humanGateAmountCents) is disabled. Default $2,500.
    */
   taxOptimizeMaxCents?: number;
+  /**
+   * Type-I (over-claim) aversion. Tax errors are asymmetric: booking a personal expense as
+   * business (back tax + penalty + audit exposure) costs far more than the reverse (just a
+   * missed deduction, recoverable by amending). So when the optimizer would grab a DEDUCTION
+   * over a non-deductible alternative (the "is it even a business expense" axis) but the
+   * council's confidence is a genuine coin-flip BELOW this floor, the item is left for a
+   * human instead of auto-deducted. Leaning is still free when (a) it's only choosing between
+   * business categories, or (b) confidence is at/above the floor (real business-purpose
+   * signal). Default 0.6. Set 0 to disable Type-I aversion (revert to pure max-deduction).
+   */
+  taxLeanConfidenceFloor?: number;
 }
+
+const DEFAULT_TAX_LEAN_FLOOR = 0.6;
 
 const DEFAULT_TAX_OPTIMIZE_MAX_CENTS = 250_000; // $2,500
 
@@ -266,6 +279,9 @@ export async function auditOne(
             ? "large charge requires a human"
             : "below confidence threshold";
     const escalated = tooSensitive || tooLarge;
+    // Hoisted so the fall-through quarantine can distinguish a deliberate Type-I deferral.
+    const leanFloor = config.taxLeanConfidenceFloor ?? DEFAULT_TAX_LEAN_FLOOR;
+    let riskyLowConfidenceDeduction = false;
 
     // Tax-optimize (Ariel 2026-06-17): when we are merely UNSURE — never on a hard gate
     // (sensitive account, large amount, council human-gate, needs-access already returned
@@ -281,7 +297,13 @@ export async function auditOne(
       }
       for (const c of verdict.candidates ?? []) pool.push(c);
       const pick = pickTaxOptimal(pool, chartTax, sensitive);
-      if (pick) {
+      // Type-I aversion: if the pick GRABS A DEDUCTION over a non-deductible alternative
+      // (the high-asymmetry axis) but confidence is a coin-flip below the lean floor, do
+      // NOT auto-deduct — fall through and leave it for a human. Over-claiming costs far
+      // more than under-claiming, so a low-confidence deduction call isn't worth taking.
+      riskyLowConfidenceDeduction =
+        pick !== null && pick.beatNonDeductible && verdict.confidence < leanFloor;
+      if (pick && !riskyLowConfidenceDeduction) {
         const bp = clampPct(pick.businessPct);
         const posted = await applyManualCategorization(sql, tenantId, sourceTxnId, pick.accountCode, bp, true, "llm");
         const rationale = `tax-optimized (auditor unsure: ${reason}). ${pick.reasoning}. council: ${verdict.rationale}`;
@@ -307,16 +329,28 @@ export async function auditOne(
       }
     }
 
+    // A low-confidence deduction we deliberately DID NOT grab (Type-I aversion) is left for
+    // a human, labelled so it reads as a conservative choice rather than a plain "unsure".
+    const finalReason = riskyLowConfidenceDeduction
+      ? `low-confidence deduction left for review (Type-I aversion; conf ${verdict.confidence} < ${leanFloor})`
+      : reason;
     const d: AuditorDecision = {
       sourceTxnId,
       verdict: escalated ? "escalated" : "quarantined",
       basis: "council",
       accountCode: chosen,
       confidence: verdict.confidence,
-      rationale: reason,
+      rationale: finalReason,
     };
     await recordDecision(sql, tenantId, d, verdict.projectSlug ?? null, verdict.businessPct ?? null, verdict.rationale);
-    await logAudit(sql, tenantId, "auditor", escalated ? "escalate_guard" : "leave_quarantined", sourceTxnId, { reason });
+    await logAudit(
+      sql,
+      tenantId,
+      "auditor",
+      escalated ? "escalate_guard" : riskyLowConfidenceDeduction ? "tax_defer_conservative" : "leave_quarantined",
+      sourceTxnId,
+      { reason: finalReason },
+    );
     return d;
   }
 
@@ -355,6 +389,8 @@ export interface AuditBatchResult {
   autoPosted: number;
   /** Subset of autoPosted that the tax-optimizer booked while the auditor was unsure. */
   taxOptimized: number;
+  /** Subset of quarantined that was a deliberate Type-I deferral (deduction NOT grabbed). */
+  taxDeferredConservative: number;
   escalated: number;
   deferred: number;
   quarantined: number;
@@ -386,6 +422,7 @@ export async function auditReviewQueue(
     processed: 0,
     autoPosted: 0,
     taxOptimized: 0,
+    taxDeferredConservative: 0,
     escalated: 0,
     deferred: 0,
     quarantined: 0,
@@ -400,7 +437,11 @@ export async function auditReviewQueue(
       if (d.basis === "tax_optimized") result.taxOptimized += 1;
     } else if (d.verdict === "escalated") result.escalated += 1;
     else if (d.verdict === "deferred_access") result.deferred += 1;
-    else result.quarantined += 1;
+    else {
+      result.quarantined += 1;
+      // A Type-I deferral is a quarantine we chose on purpose (deduction not grabbed).
+      if (d.rationale.startsWith("low-confidence deduction left for review")) result.taxDeferredConservative += 1;
+    }
   }
   return result;
 }

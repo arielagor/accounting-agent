@@ -114,3 +114,21 @@ test("pickTaxOptimal dedupes repeated candidate codes", () => {
   const pick = pickTaxOptimal(cands("6130", "6130", "6070"), CHART, SENSITIVE);
   assert.equal(pick!.accountCode, "6070");
 });
+
+test("pickTaxOptimal flags beatNonDeductible when a deduction wins over a personal option", () => {
+  // 6070 (ordinary) chosen over 8000 (personal/non-deductible) → the high-asymmetry axis.
+  const pick = pickTaxOptimal(cands("6070", "8000"), CHART, SENSITIVE);
+  assert.equal(pick!.accountCode, "6070");
+  assert.equal(pick!.beatNonDeductible, true);
+});
+
+test("pickTaxOptimal does NOT flag beatNonDeductible when choosing between business categories", () => {
+  const pick = pickTaxOptimal(cands("6130", "6070"), CHART, SENSITIVE);
+  assert.equal(pick!.beatNonDeductible, false, "both candidates deductible → low-asymmetry");
+});
+
+test("pickTaxOptimal does NOT flag beatNonDeductible when the winner itself is non-deductible", () => {
+  const pick = pickTaxOptimal(cands("8000"), CHART, SENSITIVE);
+  assert.equal(pick!.accountCode, "8000");
+  assert.equal(pick!.beatNonDeductible, false, "a personal-only pool isn't grabbing a deduction");
+});

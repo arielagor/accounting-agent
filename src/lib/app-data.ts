@@ -231,6 +231,104 @@ export async function appleCatalog(sql: Sql, tenant: string): Promise<AppleCatal
   return { summary, review, leaned };
 }
 
+// ─── Agent positions: "what the agent decided on your behalf" (the sign-off surface) ──
+export interface AgentPosition {
+  kind: "tax_txn" | "apple";
+  ref: string; // source_txn_id for a transaction; "apple:<id>" for an Apple item
+  date: string;
+  what: string; // merchant / item name
+  amountCents: number; // the charge (absolute)
+  accountCode: string | null;
+  accountName: string | null;
+  businessPct: number;
+  deductibleCents: number; // the portion claimed as a deduction
+  note: string; // plain-language why
+}
+export interface AgentPositions {
+  positions: AgentPosition[];
+  totalDeductibleCents: number;
+  count: number;
+}
+
+/**
+ * Every still-unconfirmed judgment call the agent made FOR the user: tax-optimized
+ * transaction posts and Apple toss-ups it leaned to business. This is the one screen the
+ * owner reviews and signs off before filing — it owns the portfolio of positions the
+ * return rests on, rather than each one in isolation. Confirming clears an item from here.
+ */
+export async function agentPositions(sql: Sql, tenant: string): Promise<AgentPositions> {
+  const tax = await sql<
+    {
+      source_txn_id: string;
+      account_code: string | null;
+      account_name: string | null;
+      business_pct: string;
+      amount_cents: string;
+      txn_date: string | null;
+      merchant: string | null;
+      rationale: string | null;
+    }[]
+  >`
+    SELECT q.source_txn_id, q.account_code, q.account_name, q.business_pct, q.amount_cents,
+           q.txn_date, q.merchant, q.rationale FROM (
+      SELECT DISTINCT ON (ad.source_txn_id)
+        ad.source_txn_id, ad.account_code, ad.business_pct, ad.rationale, ad.confirmed_at,
+        r.amount_cents, to_char(r.posted_date,'YYYY-MM-DD') txn_date,
+        COALESCE(r.merchant_name, r.description_raw) merchant, c.name account_name
+      FROM acct_auditor_decisions ad
+      JOIN acct_transactions_raw r ON ('raw:' || r.id) = ad.source_txn_id AND r.tenant_id = ad.tenant_id
+      LEFT JOIN acct_chart c ON c.code = ad.account_code
+      WHERE ad.tenant_id = ${tenant} AND ad.basis = 'tax_optimized'
+      ORDER BY ad.source_txn_id, ad.created_at DESC
+    ) q
+    WHERE q.confirmed_at IS NULL
+    ORDER BY abs(q.amount_cents) DESC LIMIT 200`;
+
+  const apple = await sql<
+    { id: number; item: string; vendor: string | null; amount_cents: string; account_code: string | null; account_name: string | null; d: string }[]
+  >`
+    SELECT a.id, a.item, a.vendor, a.amount_cents, a.account_code, c.name account_name,
+           to_char(a.order_date,'YYYY-MM-DD') d
+    FROM acct_apple_purchases a LEFT JOIN acct_chart c ON c.code = a.account_code
+    WHERE a.tenant_id = ${tenant} AND a.auto_leaned = true
+    ORDER BY a.amount_cents DESC LIMIT 200`;
+
+  const positions: AgentPosition[] = [];
+  for (const t of tax) {
+    const amt = Math.abs(D(t.amount_cents));
+    const bp = Number(t.business_pct);
+    positions.push({
+      kind: "tax_txn",
+      ref: t.source_txn_id,
+      date: t.txn_date ?? "",
+      what: t.merchant ?? "(charge)",
+      amountCents: amt,
+      accountCode: t.account_code,
+      accountName: t.account_name,
+      businessPct: bp,
+      deductibleCents: Math.round((amt * bp) / 100),
+      note: t.rationale ?? "tax-optimized",
+    });
+  }
+  for (const a of apple) {
+    const amt = Math.abs(D(a.amount_cents));
+    positions.push({
+      kind: "apple",
+      ref: `apple:${a.id}`,
+      date: a.d ?? "",
+      what: `${a.item}${a.vendor ? " — " + a.vendor : ""}`,
+      amountCents: amt,
+      accountCode: a.account_code,
+      accountName: a.account_name,
+      businessPct: 100,
+      deductibleCents: amt,
+      note: "leaned to business (Apple toss-up)",
+    });
+  }
+  const totalDeductibleCents = positions.reduce((s, p) => s + p.deductibleCents, 0);
+  return { positions, totalDeductibleCents, count: positions.length };
+}
+
 export async function smbSummary(sql: Sql, tenant: string, asOfISO: string): Promise<SmbSummary> {
   const taxYear = Number(asOfISO.slice(0, 4));
   const [arAging, apAging, contractors1099, stax] = await Promise.all([

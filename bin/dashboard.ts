@@ -28,6 +28,7 @@ import {
   accessRequests,
   smbSummary,
   appleCatalog,
+  agentPositions,
 } from "../src/lib/app-data.js";
 import { setAppleClassification, auditAppleReview, type Bucket } from "../src/core/apple-history.js";
 import { parseOfx, parseCsv, importStatement, looksLikeOfx } from "../src/core/statements.js";
@@ -60,6 +61,8 @@ const taxOptimizeUncertain = (env.AUDITOR_TAX_OPTIMIZE ?? "1") !== "0";
 const taxOptimizeMaxCents = env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS
   ? Number(env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS)
   : undefined;
+const taxLeanConfidenceFloor =
+  env.AUDITOR_TAX_LEAN_FLOOR !== undefined ? Number(env.AUDITOR_TAX_LEAN_FLOOR) : undefined;
 
 if (host !== "127.0.0.1" && host !== "localhost" && !token) {
   error(`refusing to bind ${host} without DASHBOARD_TOKEN — set a token or bind 127.0.0.1`);
@@ -219,8 +222,9 @@ const server = createServer(async (req, res) => {
         confidenceThreshold,
         taxOptimizeUncertain,
         taxOptimizeMaxCents,
+        taxLeanConfidenceFloor,
       });
-      return json(res, 200, { ok: true, ...r, decisions: undefined, summary: { processed: r.processed, autoPosted: r.autoPosted, taxOptimized: r.taxOptimized, escalated: r.escalated, deferred: r.deferred, quarantined: r.quarantined } });
+      return json(res, 200, { ok: true, ...r, decisions: undefined, summary: { processed: r.processed, autoPosted: r.autoPosted, taxOptimized: r.taxOptimized, taxDeferredConservative: r.taxDeferredConservative, escalated: r.escalated, deferred: r.deferred, quarantined: r.quarantined } });
     }
     if (req.method === "POST" && path === "/api/access") {
       const b = await readBody(req);
@@ -263,6 +267,39 @@ const server = createServer(async (req, res) => {
       // Same toggle as the transaction auditor: lean genuine toss-ups to business when on.
       const r = await auditAppleReview(sql, tenant, spawnClaudeRunner(), 25, taxOptimizeUncertain);
       return json(res, 200, { ok: true, ...r });
+    }
+    if (req.method === "GET" && path === "/api/positions") {
+      return json(res, 200, await agentPositions(sql, tenant));
+    }
+    if (req.method === "POST" && path === "/api/positions/confirm") {
+      // Keep the agent's call, but mark it reviewed so it drops off the sign-off list.
+      const b = await readBody(req);
+      const ref = String(b.ref ?? "");
+      if (ref.startsWith("apple:")) {
+        const id = Number(ref.slice("apple:".length));
+        const r = await setAppleClassification(sql, tenant, id, "business", b.accountCode ? String(b.accountCode) : null);
+        return json(res, 200, { ok: r.ok });
+      }
+      await sql`UPDATE acct_auditor_decisions SET confirmed_at = now()
+                WHERE tenant_id = ${tenant} AND source_txn_id = ${ref} AND basis = 'tax_optimized' AND confirmed_at IS NULL`;
+      return json(res, 200, { ok: true });
+    }
+    if (req.method === "POST" && path === "/api/positions/flip") {
+      // Reject the agent's deduction → book it personal (non-deductible) and clear it.
+      const b = await readBody(req);
+      const ref = String(b.ref ?? "");
+      if (ref.startsWith("apple:")) {
+        const id = Number(ref.slice("apple:".length));
+        const r = await setAppleClassification(sql, tenant, id, "personal", null);
+        return json(res, 200, { ok: r.ok });
+      }
+      const r = await recategorizeTransaction(sql, tenant, ref, "9500", 0);
+      const ok = r.posted || r.alreadyPosted;
+      if (ok) {
+        await sql`UPDATE acct_auditor_decisions SET confirmed_at = now()
+                  WHERE tenant_id = ${tenant} AND source_txn_id = ${ref} AND basis = 'tax_optimized' AND confirmed_at IS NULL`;
+      }
+      return json(res, 200, { ok, error: ok ? undefined : r.reason || "could not recategorize" });
     }
     if (req.method === "POST" && path === "/api/push/subscribe") {
       const b = await readBody(req);

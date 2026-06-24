@@ -38,6 +38,10 @@ async function main(): Promise<void> {
   const taxOptimizeMaxCents = env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS
     ? Number(env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS)
     : undefined;
+  // Type-I (over-claim) aversion floor: a low-confidence deduction below this is left for a
+  // human rather than auto-deducted. AUDITOR_TAX_LEAN_FLOOR=0 disables it.
+  const taxLeanConfidenceFloor =
+    env.AUDITOR_TAX_LEAN_FLOOR !== undefined ? Number(env.AUDITOR_TAX_LEAN_FLOOR) : undefined;
   const sql = openSql(env.ACCT_DB_URL);
   try {
     const council = new ClaudeCouncil(spawnClaudeRunner());
@@ -45,10 +49,12 @@ async function main(): Promise<void> {
       confidenceThreshold,
       taxOptimizeUncertain,
       taxOptimizeMaxCents,
+      taxLeanConfidenceFloor,
     });
     log(
       `audit: processed=${r.processed} auto-posted=${r.autoPosted} (tax-optimized=${r.taxOptimized}) ` +
-        `escalated=${r.escalated} awaiting-access=${r.deferred} still-quarantined=${r.quarantined}`,
+        `tax-deferred=${r.taxDeferredConservative} escalated=${r.escalated} ` +
+        `awaiting-access=${r.deferred} still-quarantined=${r.quarantined}`,
     );
   } catch (e) {
     error("audit failed:", e instanceof Error ? e.message : String(e));

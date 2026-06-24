@@ -37,6 +37,14 @@ export interface TaxOptimalPick {
   treatment: TaxTreatment;
   /** 0..100 current-year benefit score the pick won on. */
   benefit: number;
+  /**
+   * True when this is a DEDUCTIBLE pick (benefit > 0) that won over an eligible
+   * NON-deductible alternative (a personal/nondeductible account the council also
+   * offered). This flags the high-audit-asymmetry axis — "is this even a business
+   * expense" — where the auditor applies Type-I aversion (only lean on real signal).
+   * False when the choice was merely between business categories (low-asymmetry).
+   */
+  beatNonDeductible: boolean;
   /** Human-readable why-this-one (carried into the audit trail). */
   reasoning: string;
 }
@@ -116,6 +124,10 @@ export function pickTaxOptimal(
 
   const best = scored[0]!;
   const alt = scored.length > 1 ? scored[1]! : null;
+  // High-asymmetry flag: a deductible winner that beat an eligible non-deductible option
+  // (benefit 0 = personal/nondeductible). This is the "is it even a business expense"
+  // axis, where over-claiming costs far more than under-claiming.
+  const beatNonDeductible = best.score > 0 && scored.some((s) => s.score === 0);
   const reasoning =
     `tax-optimal among ${scored.length} defensible account(s): chose ${best.info.code} ` +
     `${best.info.name} (${best.info.taxTreatment}, benefit ${best.score}/100)` +
@@ -126,6 +138,7 @@ export function pickTaxOptimal(
     businessPct: clampPct(best.cand.businessPct),
     treatment: best.info.taxTreatment,
     benefit: best.score,
+    beatNonDeductible,
     reasoning,
   };
 }
