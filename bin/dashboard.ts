@@ -145,7 +145,12 @@ const server = createServer(async (req, res) => {
       const period = u.searchParams.get("period") || (await latestPeriod());
       const data = await getDashboardData(sql, tenant, period, new Date().toISOString());
       const netWorth = await netWorthSeries(sql, tenant, period.slice(0, 4));
-      return json(res, 200, { ...data, netWorth });
+      // Trust line: how many accounts are feeding this, and how fresh the data is.
+      const prov = await sql<{ accounts: string; through: string | null }[]>`
+        SELECT count(DISTINCT source_account_id) accounts, to_char(max(posted_date),'YYYY-MM-DD') through
+        FROM acct_transactions_raw WHERE tenant_id = ${tenant}`;
+      const provenance = { accounts: Number(prov[0]?.accounts ?? 0), throughDate: prov[0]?.through ?? null };
+      return json(res, 200, { ...data, netWorth, provenance });
     }
     if (req.method === "GET" && path === "/api/transactions") {
       const period = u.searchParams.get("period") || (await latestPeriod());

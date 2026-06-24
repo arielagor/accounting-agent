@@ -91,11 +91,12 @@ const esc=s=>(s||'').toString().replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>'
 function applyMobile(on){document.body.classList.toggle('mobile',on);const b=$('#mtoggle');if(b)b.classList.toggle('on',on);try{localStorage.setItem('acct_mobile',on?'1':'0')}catch(e){}}
 function toggleMobile(){applyMobile(!document.body.classList.contains('mobile'))}
 let PERIOD='',CHART=[],CONFIG={};
-const TABS=[['overview','Overview'],['txns','Transactions'],['budgets','Budgets'],['advisor','Advisor'],['receipts','Receipts'],['apple','Apple'],['smb','Business'],['review','Review']];
+const TABS=[['overview','Overview'],['txns','Transactions'],['budgets','Budgets'],['advisor','Advisor'],['receipts','Receipts'],['apple','Apple purchases'],['smb','Invoices & bills'],['review','Needs you']];
 let TAB='overview';
 function renderTabs(){$('#tabs').innerHTML=TABS.map(([k,l])=>'<button class="'+(k===TAB?'active':'')+'" onclick="go(\\''+k+'\\')">'+l+'</button>').join('')}
 function go(t){TAB=t;renderTabs();draw()}
-function chartOpts(){return CHART.map(c=>'<option value="'+c.code+'">'+c.code+' '+esc(c.name)+'</option>').join('')}
+// Owner-facing dropdown: the category NAME, not the raw chart code (value stays the code).
+function chartOpts(){return CHART.map(c=>'<option value="'+c.code+'">'+esc(c.name)+'</option>').join('')}
 
 // ── Net-worth sparkline (inline SVG) ─────────────────────────────────────────
 function sparkline(points){if(!points||!points.length)return '';const w=560,h=120,pad=8;
@@ -118,25 +119,35 @@ async function draw(){const w=$('#wrap');w.innerHTML='<div class="card"><span cl
 
 async function drawOverview(){const d=await jget('/api/overview?period='+PERIOD);CHART=d.chart;
  const v=d.closePackage,p=v.portfolio;
- const ver=v.tieOut===false?'<span class="badge bad">TIE-OUT?</span>':'<span class="badge">'+(d.closeStatus||'DRAFT')+(d.locked?' · LOCKED':'')+'</span>';
+ // Owner-friendly status: never the scary "TIE-OUT?" jargon.
+ const ver=v.tieOut===false?'<span class="badge bad">books need a check</span>':'<span class="badge">'+(d.closeStatus==='live'?'live':'draft')+'</span>';
  $('#verdict').innerHTML=ver;$('#gen').textContent='as of '+new Date(d.generatedAt).toLocaleString();
- const nw=d.netWorth||[];const last=nw.length?nw[nw.length-1]:null;
+ const cash=v.cash.totalCents,burn=(p.expenseCents||0)+(p.cogsCents||0);
+ const rwk=(burn>0&&cash>0)?Math.round((cash/burn)*4.33):null; // weeks of cash at this period's spend
+ const runTxt=cash<=0?'accounts are net negative — check your cash position':(burn<=0?'spending less than you bring in':(rwk!=null?('≈ '+rwk+' weeks of cash at this pace'):''));
+ const prov=d.provenance||{};
  let h='';
- h+='<div class="card full"><h2>Net worth — '+PERIOD.slice(0,4)+'</h2>'+(last?'<div class="kpi '+(last.netWorthCents>=0?'pos':'neg')+'">'+usd(last.netWorthCents)+'</div><div class="sub">assets '+usd(last.assetsCents)+' · liabilities '+usd(last.liabilitiesCents)+'</div>':'<div class="muted">no data</div>')+sparkline(nw)+'</div>';
- h+='<div class="card"><h2>Portfolio P&amp;L — '+d.period+'</h2><div class="kpi '+(p.netCents>=0?'pos':'neg')+'">'+usd(p.netCents)+' net</div>'
-   +'<table><tr><td>Revenue</td><td class="r">'+usd(p.revenueCents)+'</td></tr><tr><td>COGS</td><td class="r">'+usd(-p.cogsCents)+'</td></tr><tr><td>Operating expense</td><td class="r">'+usd(-p.expenseCents)+'</td></tr></table>'
-   +'<div class="sub" style="margin-top:8px">Est. quarterly tax set-aside: '+usd(v.estimatedTaxCents)+'</div></div>';
- h+='<div class="card"><h2>Cash position</h2><table>'+v.cash.byAccount.map(a=>'<tr><td>'+a.code+' '+esc(a.name)+'</td><td class="r">'+usd(a.balanceCents)+'</td></tr>').join('')+'<tr><td><b>Total cash</b></td><td class="r"><b>'+usd(v.cash.totalCents)+'</b></td></tr></table></div>';
- h+='<div class="card"><h2>Per-project P&amp;L</h2><table><tr><th>Project</th><th class="r">Net</th></tr>'+v.perProject.map(x=>'<tr><td>'+esc(x.projectSlug)+'</td><td class="r '+(x.netCents>=0?'pos':'neg')+'">'+usd(x.netCents)+'</td></tr>').join('')+'</table></div>';
+ // Trust line.
+ h+='<div class="card full" style="padding:10px 16px"><span class="sub">Synced from '+(prov.accounts||0)+' account'+(prov.accounts===1?'':'s')+(prov.throughDate?(' · up to date through '+prov.throughDate):'')+'</span></div>';
+ // The three answers an owner actually wants first.
+ h+='<div class="card"><h2>Cash on hand</h2><div class="kpi '+(cash>=0?'pos':'neg')+'">'+usd(cash)+'</div><div class="sub">'+runTxt+'</div></div>';
+ h+='<div class="card"><h2>Profit — '+d.period+'</h2><div class="kpi '+(p.netCents>=0?'pos':'neg')+'">'+usd(p.netCents)+'</div><div class="sub">money in '+usd(p.revenueCents)+' · money out '+usd(p.cogsCents+p.expenseCents)+'</div></div>';
+ h+='<div class="card"><h2>Set aside for taxes</h2><div class="kpi warnc">'+usd(v.estimatedTaxCents)+'</div><div class="sub">this quarter\\'s estimate — move it to your tax savings</div></div>';
+ // Details, demoted below the three answers.
+ const nw=d.netWorth||[];const last=nw.length?nw[nw.length-1]:null;
+ h+='<div class="card full"><h2>Net worth — '+PERIOD.slice(0,4)+'</h2>'+(last?'<div class="kpi '+(last.netWorthCents>=0?'pos':'neg')+'">'+usd(last.netWorthCents)+'</div><div class="sub">what you own '+usd(last.assetsCents)+' · what you owe '+usd(last.liabilitiesCents)+'</div>':'<div class="muted">no data</div>')+sparkline(nw)+'</div>';
+ h+='<div class="card"><h2>Profit detail</h2><table><tr><td>Money in (revenue)</td><td class="r">'+usd(p.revenueCents)+'</td></tr><tr><td>Cost of goods</td><td class="r">'+usd(-p.cogsCents)+'</td></tr><tr><td>Expenses</td><td class="r">'+usd(-p.expenseCents)+'</td></tr><tr><td><b>Profit</b></td><td class="r '+(p.netCents>=0?'pos':'neg')+'"><b>'+usd(p.netCents)+'</b></td></tr></table></div>';
+ h+='<div class="card"><h2>Cash by account</h2><table>'+v.cash.byAccount.map(a=>'<tr><td>'+esc(a.name)+'</td><td class="r">'+usd(a.balanceCents)+'</td></tr>').join('')+'<tr><td><b>Total</b></td><td class="r"><b>'+usd(v.cash.totalCents)+'</b></td></tr></table></div>';
+ h+='<div class="card"><h2>Profit by project</h2><table><tr><th>Project</th><th class="r">Net</th></tr>'+v.perProject.map(x=>'<tr><td>'+esc(x.projectSlug)+'</td><td class="r '+(x.netCents>=0?'pos':'neg')+'">'+usd(x.netCents)+'</td></tr>').join('')+'</table></div>';
  $('#wrap').innerHTML=h;}
 
 async function drawTxns(){const d=await jget('/api/transactions?period='+PERIOD);if(!CHART.length){CHART=(await jget('/api/overview?period='+PERIOD)).chart}
  const opts=chartOpts();
  let h='<div class="card full"><h2>Transactions — '+d.period+' ('+d.transactions.length+')</h2><table><tr><th>Date</th><th>Merchant</th><th class="r">Amount</th><th>Status</th><th>Category</th><th></th></tr>';
  h+=d.transactions.map(t=>{const sel='<select data-code>'+opts.replace('value="'+(t.account||'')+'"','value="'+(t.account||'')+'" selected')+'</select>';
-   const badge=t.status==='posted'?'<span class="badge">posted</span>':t.status==='review'?'<span class="badge warn">review</span>':'<span class="badge mut">unposted</span>';
+   const badge=t.status==='posted'?'<span class="badge">done</span>':t.status==='review'?'<span class="badge warn">needs review</span>':'<span class="badge mut">new</span>';
    return '<tr class="txn" data-id="'+t.sourceTxnId+'"><td class="muted">'+(t.date||'')+'</td><td>'+esc(t.merchant)+'</td><td class="r '+(t.amountCents<0?'':'pos')+'">'+usd(t.amountCents)+'</td><td>'+badge+'</td><td>'+sel+'</td><td><button onclick="saveTxn(this,\\''+t.status+'\\')">Save</button> <span class="ok"></span></td></tr>'}).join('');
- h+='</table><div class="sub" style="margin-top:8px">Editing a posted transaction re-categorizes it (voids + re-posts) and re-learns the merchant.</div></div>';
+ h+='</table><div class="sub" style="margin-top:8px">Changing a category recategorizes the charge and teaches the agent for next time.</div></div>';
  $('#wrap').innerHTML=h;}
 async function saveTxn(btn,status){const tr=btn.closest('tr');const id=tr.dataset.id;const code=tr.querySelector('[data-code]').value;btn.disabled=true;
  const ep=status==='posted'?'/api/recategorize':'/api/resolve';const r=await jpost(ep,{sourceTxnId:id,accountCode:code});
@@ -189,7 +200,7 @@ async function drawReceipts(){const d=await jget('/api/receipts');const ac=await
  h+='<div class="card full"><h2>Documents ('+d.documents.length+')</h2><table><tr><th>Date</th><th>Vendor</th><th class="r">Total</th><th>Lines</th><th>Status</th></tr>'
    +d.documents.map(x=>'<tr><td class="muted">'+(x.docDate||x.createdAt)+'</td><td>'+esc(x.vendorGuess||x.sourceKind)+'</td><td class="r">'+(x.totalCents!=null?usd(x.totalCents):'—')+'</td><td>'+x.lines+'</td><td>'+statusBadge(x.status)+'</td></tr>').join('')+'</table></div>';
  $('#wrap').innerHTML=h;}
-function statusBadge(s){const m={split:'badge',matched:'badge',extracted:'badge mut',pending:'badge mut',unmatched:'badge warn',error:'badge bad',filed:'badge'};return '<span class="'+(m[s]||'badge mut')+'">'+s+'</span>'}
+function statusBadge(s){const cls={split:'badge',matched:'badge',extracted:'badge mut',pending:'badge mut',unmatched:'badge warn',error:'badge bad',filed:'badge'};const lab={split:'itemized',matched:'matched',extracted:'read',pending:'working',unmatched:'needs a match',error:'error',filed:'filed'};return '<span class="'+(cls[s]||'badge mut')+'">'+(lab[s]||s)+'</span>'}
 function loadFile(file,targetId,nameId){if(!file)return;const rd=new FileReader();rd.onload=()=>{const el=$('#'+targetId);if(el)el.value=rd.result;const n=$('#'+nameId);if(n)n.textContent=file.name+' ('+Math.round(file.size/1024)+' KB)';};rd.onerror=()=>{const n=$('#'+nameId);if(n){n.className='err';n.textContent='could not read file'}};rd.readAsText(file)}
 function dropFile(e,targetId,nameId){e.preventDefault();const f=e.dataTransfer&&e.dataTransfer.files&&e.dataTransfer.files[0];if(f)loadFile(f,targetId,nameId)}
 async function upStmt(btn){const t=$('#stext').value;if(!t.trim())return;const accountId=Number($('#sacct').value);btn.disabled=true;btn.textContent='Importing…';
@@ -234,14 +245,21 @@ async function classApple(btn,bucket){const tr=btn.closest('tr');const id=Number
  if(r.ok){sp.className='ok';sp.textContent='✓ '+bucket+(r.learnedVendor?' · learned':'');setTimeout(()=>tr.remove(),500)}else{sp.className='err';sp.textContent='✗';btn.disabled=false}}
 
 async function drawSmb(){const d=await jget('/api/smb');
- const ag=(t,a)=>'<div class="card"><h2>'+t+' aging</h2><table><tr><td>Current</td><td class="r">'+usd(a.current)+'</td></tr><tr><td>1–30</td><td class="r">'+usd(a.d1_30)+'</td></tr><tr><td>31–60</td><td class="r">'+usd(a.d31_60)+'</td></tr><tr><td>61–90</td><td class="r '+(a.d61_90?'warnc':'')+'">'+usd(a.d61_90)+'</td></tr><tr><td>90+</td><td class="r '+(a.d90plus?'neg':'')+'">'+usd(a.d90plus)+'</td></tr></table></div>';
- let h=ag('Receivables (AR)',d.arAging)+ag('Payables (AP)',d.apAging);
+ const ag=(t,sub,a)=>'<div class="card"><h2>'+t+'</h2><div class="sub" style="margin:-6px 0 8px">'+sub+'</div><table><tr><td>Not yet due</td><td class="r">'+usd(a.current)+'</td></tr><tr><td>1–30 days late</td><td class="r">'+usd(a.d1_30)+'</td></tr><tr><td>31–60 days late</td><td class="r">'+usd(a.d31_60)+'</td></tr><tr><td>61–90 days late</td><td class="r '+(a.d61_90?'warnc':'')+'">'+usd(a.d61_90)+'</td></tr><tr><td>90+ days late</td><td class="r '+(a.d90plus?'neg':'')+'">'+usd(a.d90plus)+'</td></tr></table></div>';
+ let h=ag('Money owed to you','invoices customers still need to pay',d.arAging)+ag('Bills you owe','what you still need to pay out',d.apAging);
  h+='<div class="card"><h2>1099 contractors</h2>'+(d.contractors1099.length?'<table><tr><th>Vendor</th><th class="r">YTD paid</th><th>W-9</th></tr>'+d.contractors1099.map(c=>'<tr><td>'+esc(c.name)+'</td><td class="r">'+usd(c.ytdPaidCents)+'</td><td>'+(c.w9OnFile?'<span class="badge">on file</span>':'<span class="badge bad">missing</span>')+'</td></tr>').join('')+'</table>':'<div class="muted">No contractors over the $600 1099 bar.</div>')+'</div>';
  h+='<div class="card"><h2>Sales tax</h2>'+(d.salesTax.length?'<table><tr><th>Jurisdiction</th><th>Period</th><th class="r">Collected</th><th>Status</th></tr>'+d.salesTax.map(s=>'<tr><td>'+esc(s.jurisdiction)+'</td><td>'+s.period+'</td><td class="r">'+usd(s.collectedCents)+'</td><td>'+statusBadge(s.status)+'</td></tr>').join('')+'</table>':'<div class="muted">No sales tax collected.</div>')+'</div>';
  $('#wrap').innerHTML=h;}
 
 async function drawReview(){const d=await jget('/api/review?period='+PERIOD);CHART=d.chart;const opts=chartOpts();
- let h='<div class="card full"><div class="row2" style="justify-content:space-between"><h2 style="margin:0">To review — '+d.quarantine.length+' need a call</h2><button class="primary" onclick="runAudit(this)" title="Let the auditor + council resolve what it can">Run auditor</button></div>'
+ const pos=await jget('/api/positions');
+ let h='';
+ if(pos.count){h+='<div class="card full"><h2>What the agent did for you — '+pos.count+' to confirm ('+usd(pos.totalDeductibleCents)+' in deductions)</h2>'
+   +'<div class="sub" style="margin-bottom:8px">Judgment calls the agent made to save you tax. Keep the ones you agree with; change any that should be personal. Nothing is locked in until you confirm.</div>'
+   +'<table><tr><th>Date</th><th>What</th><th class="r">Amount</th><th>Booked as</th><th></th></tr>'
+   +pos.positions.map(x=>'<tr class="prow" data-ref="'+esc(x.ref)+'"><td class="muted">'+(x.date||'')+'</td><td>'+esc(x.what)+'<div class="sub muted">'+esc(x.note)+'</div></td><td class="r">'+usd(x.amountCents)+'</td><td>'+esc(x.accountName||x.accountCode||'')+(x.businessPct<100?(' <span class="sub muted">'+x.businessPct+'% business</span>'):'')+'</td>'
+   +'<td class="row2"><button onclick="confirmPos(this)">Keep</button><button onclick="flipPos(this)">Make personal</button> <span class="ok"></span></td></tr>').join('')+'</table></div>';}
+ h+='<div class="card full"><div class="row2" style="justify-content:space-between"><h2 style="margin:0">To review — '+d.quarantine.length+' need a call</h2><button class="primary" onclick="runAudit(this)" title="Let the auditor + council resolve what it can">Run auditor</button></div>'
    +'<table><tr><th>Date</th><th>Merchant</th><th class="r">Amount</th><th>Reason</th><th>Categorize as</th><th></th></tr>'
    +d.quarantine.map(q=>'<tr class="qrow" data-id="'+q.sourceTxnId+'"><td class="muted">'+(q.date||'')+'</td><td>'+esc(q.merchant)+'</td><td class="r">'+usd(q.amountCents)+'</td><td class="muted">'+esc(q.reason)+'</td><td><select>'+opts+'</select></td><td><button onclick="resolveQ(this)">Save</button> <span class="ok"></span></td></tr>').join('')+'</table></div>';
  if(d.accessRequests.length){h+='<div class="card full"><h2>Access requests — the agent needs your OK</h2>'
@@ -249,8 +267,10 @@ async function drawReview(){const d=await jget('/api/review?period='+PERIOD);CHA
  $('#wrap').innerHTML=h;}
 async function resolveQ(btn){const tr=btn.closest('tr');const r=await jpost('/api/resolve',{sourceTxnId:tr.dataset.id,accountCode:tr.querySelector('select').value});
  const sp=tr.querySelector('.ok');if(r.ok){sp.textContent='✓ posted';setTimeout(()=>tr.remove(),500)}else{sp.className='err';sp.textContent='✗ '+(r.reason||r.error)}}
-async function runAudit(btn){btn.disabled=true;btn.textContent='Auditing…';const r=await jpost('/api/audit/run',{});if(r.ok){var to=r.summary.taxOptimized||0;var opt=to?(' ('+to+' tax-optimized — re-categorize any in Transactions to correct + teach it)'):'';alert('Auditor: '+r.summary.autoPosted+' auto-posted'+opt+', '+r.summary.escalated+' escalated, '+r.summary.deferred+' awaiting access, '+r.summary.quarantined+' still need you.')}draw()}
+async function runAudit(btn){btn.disabled=true;btn.textContent='Auditing…';const r=await jpost('/api/audit/run',{});if(r.ok){var s=r.summary;var to=s.taxOptimized||0;var td=s.taxDeferredConservative||0;var opt=to?(' ('+to+' tax calls for you to confirm above)'):'';var def=td?(', '+td+' left for you (low-confidence deductions not taken)'):'';alert('Auditor: '+s.autoPosted+' sorted'+opt+def+', '+s.escalated+' need a closer look, '+s.quarantined+' still need you.')}draw()}
 async function grant(id,decision,btn){const r=await jpost('/api/access',{id,decision});const sp=btn.parentElement.querySelector('.ok');if(r.ok){sp.textContent='✓';setTimeout(draw,400)}else{sp.className='err';sp.textContent='✗'}}
+async function confirmPos(btn){const tr=btn.closest('tr');const ref=tr.dataset.ref;btn.disabled=true;const r=await jpost('/api/positions/confirm',{ref});const sp=tr.querySelector('.ok');if(r.ok){sp.textContent='✓ kept';setTimeout(()=>tr.remove(),400)}else{sp.className='err';sp.textContent='✗';btn.disabled=false}}
+async function flipPos(btn){const tr=btn.closest('tr');const ref=tr.dataset.ref;btn.disabled=true;const r=await jpost('/api/positions/flip',{ref});const sp=tr.querySelector('.ok');if(r.ok){sp.textContent='✓ personal';setTimeout(()=>tr.remove(),400)}else{sp.className='err';sp.textContent='✗ '+(r.error||'');btn.disabled=false}}
 
 // ── Push ─────────────────────────────────────────────────────────────────────
 function b64ToU8(b){const pad='='.repeat((4-b.length%4)%4);const s=(b+pad).replace(/-/g,'+').replace(/_/g,'/');const raw=atob(s);return Uint8Array.from([...raw].map(c=>c.charCodeAt(0)))}
