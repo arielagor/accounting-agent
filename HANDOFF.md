@@ -52,6 +52,18 @@ the foundation this builds on; its details live in git history + the GBrain proj
     "Auto-leaned to business — confirm or flip" in the Apple tab, and DON'T learn a merchant rule until a
     human confirms. `auditAppleReview` is now wired to a "Run Apple auditor" button via
     `POST /api/apple/audit` (previously ad-hoc only).
+  - **Rebase on the two socratic answers (2026-06-23/24, migration 017, docs/decisions/0005):**
+    (1) **Type-I aversion** — `pickTaxOptimal.beatNonDeductible` + `AUDITOR_TAX_LEAN_FLOOR` (default 0.6):
+    a low-confidence deduction that beat a personal option is LEFT for a human, not auto-claimed (tax errors
+    are asymmetric). Lean stays free for business-vs-business or when conf >= floor. Tally
+    `taxDeferredConservative`. (2) **Aggregate sign-off** — `agentPositions()` + `GET /api/positions` +
+    confirm/flip; the "Needs you" tab lists every tax-optimized post + Apple leaned item with deductible
+    impact so the owner approves the PORTFOLIO before filing; `confirmed_at` drops a confirmed item.
+    (3) **Owner translation layer** — Overview leads with Cash on hand (+runway) / Profit / Taxes-to-set-aside
+    + a "Synced from N accounts" trust line; relabeled all engine jargon (P&L->Profit, COGS->Cost of goods,
+    AR/AP aging->Money owed to you / Bills you owe, posted->done, tie-out->"books need a check", chart codes
+    dropped from the surface); tabs renamed (Apple purchases / Invoices & bills / Needs you). Verified live
+    in-browser, no console errors. Deferred: a deep IA restructure (Money/Spending/Get-paid/To-do).
 - **Verified live:** web app renders + tab-switches in-browser; tax-optimize proven by DB-backed tests that post
   to the real ledger + exercise every guard; `npm run advise` generated 13 grounded recommendations on real books.
 
