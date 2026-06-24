@@ -63,6 +63,11 @@ const taxOptimizeMaxCents = env.AUDITOR_TAX_OPTIMIZE_MAX_CENTS
   : undefined;
 const taxLeanConfidenceFloor =
   env.AUDITOR_TAX_LEAN_FLOOR !== undefined ? Number(env.AUDITOR_TAX_LEAN_FLOOR) : undefined;
+// Council settles review items with best judgement + read-only internet research (to ID
+// unfamiliar merchants). AUDITOR_RESEARCH=0 makes the council text-only.
+const auditorResearch = (env.AUDITOR_RESEARCH ?? "1") !== "0";
+const councilRunner = () =>
+  auditorResearch ? spawnClaudeRunner(180_000, { allowedTools: ["WebSearch", "WebFetch"] }) : spawnClaudeRunner();
 
 if (host !== "127.0.0.1" && host !== "localhost" && !token) {
   error(`refusing to bind ${host} without DASHBOARD_TOKEN — set a token or bind 127.0.0.1`);
@@ -222,7 +227,7 @@ const server = createServer(async (req, res) => {
       return json(res, 200, { quarantine: data.quarantine, chart: data.chart, accessRequests: await accessRequests(sql, tenant) });
     }
     if (req.method === "POST" && path === "/api/audit/run") {
-      const council = new ClaudeCouncil(spawnClaudeRunner());
+      const council = new ClaudeCouncil(councilRunner());
       const r = await auditReviewQueue(sql, tenant, council, {
         confidenceThreshold,
         taxOptimizeUncertain,

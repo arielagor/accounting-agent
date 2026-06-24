@@ -42,9 +42,16 @@ async function main(): Promise<void> {
   // human rather than auto-deducted. AUDITOR_TAX_LEAN_FLOOR=0 disables it.
   const taxLeanConfidenceFloor =
     env.AUDITOR_TAX_LEAN_FLOOR !== undefined ? Number(env.AUDITOR_TAX_LEAN_FLOOR) : undefined;
+  // The council settles ambiguity with best judgement and may use read-only internet
+  // research (WebSearch/WebFetch) to identify unfamiliar merchants. AUDITOR_RESEARCH=0
+  // disables research (text-only council). Research adds web latency → a longer timeout.
+  const research = (env.AUDITOR_RESEARCH ?? "1") !== "0";
+  const councilRunner = research
+    ? spawnClaudeRunner(180_000, { allowedTools: ["WebSearch", "WebFetch"] })
+    : spawnClaudeRunner();
   const sql = openSql(env.ACCT_DB_URL);
   try {
-    const council = new ClaudeCouncil(spawnClaudeRunner());
+    const council = new ClaudeCouncil(councilRunner);
     const r = await auditReviewQueue(sql, tenant, council, {
       confidenceThreshold,
       taxOptimizeUncertain,

@@ -144,14 +144,15 @@ async function drawOverview(){const d=await jget('/api/overview?period='+PERIOD)
 async function drawTxns(){const d=await jget('/api/transactions?period='+PERIOD);if(!CHART.length){CHART=(await jget('/api/overview?period='+PERIOD)).chart}
  const opts=chartOpts();
  let h='<div class="card full"><h2>Transactions — '+d.period+' ('+d.transactions.length+')</h2><table><tr><th>Date</th><th>Merchant</th><th class="r">Amount</th><th>Status</th><th>Category</th><th></th></tr>';
- h+=d.transactions.map(t=>{const sel='<select data-code>'+opts.replace('value="'+(t.account||'')+'"','value="'+(t.account||'')+'" selected')+'</select>';
+ h+=d.transactions.map(t=>{const ph=t.account?'':'<option value="" disabled selected>— choose category —</option>';const sel='<select data-code onchange="saveTxn(this,\\''+t.status+'\\')">'+ph+opts.replace('value="'+(t.account||'')+'"','value="'+(t.account||'')+'" selected')+'</select>';
    const badge=t.status==='posted'?'<span class="badge">done</span>':t.status==='review'?'<span class="badge warn">needs review</span>':'<span class="badge mut">new</span>';
-   return '<tr class="txn" data-id="'+t.sourceTxnId+'"><td class="muted">'+(t.date||'')+'</td><td>'+esc(t.merchant)+'</td><td class="r '+(t.amountCents<0?'':'pos')+'">'+usd(t.amountCents)+'</td><td>'+badge+'</td><td>'+sel+'</td><td><button onclick="saveTxn(this,\\''+t.status+'\\')">Save</button> <span class="ok"></span></td></tr>'}).join('');
- h+='</table><div class="sub" style="margin-top:8px">Changing a category recategorizes the charge and teaches the agent for next time.</div></div>';
+   return '<tr class="txn" data-id="'+t.sourceTxnId+'"><td class="muted">'+(t.date||'')+'</td><td>'+esc(t.merchant)+'</td><td class="r '+(t.amountCents<0?'':'pos')+'">'+usd(t.amountCents)+'</td><td>'+badge+'</td><td>'+sel+'</td><td><span class="ok"></span></td></tr>'}).join('');
+ h+='</table><div class="sub" style="margin-top:8px">Pick a category and it saves instantly — recategorizes the charge and teaches the agent for next time.</div></div>';
  $('#wrap').innerHTML=h;}
-async function saveTxn(btn,status){const tr=btn.closest('tr');const id=tr.dataset.id;const code=tr.querySelector('[data-code]').value;btn.disabled=true;
+async function saveTxn(sel,status){const code=sel.value;if(!code)return;const tr=sel.closest('tr');const id=tr.dataset.id;sel.disabled=true;
+ const sp=tr.querySelector('.ok');sp.className='ok';sp.textContent='saving…';
  const ep=status==='posted'?'/api/recategorize':'/api/resolve';const r=await jpost(ep,{sourceTxnId:id,accountCode:code});
- const sp=tr.querySelector('.ok');if(r.ok){sp.className='ok';sp.textContent='✓ saved'}else{sp.className='err';sp.textContent='✗ '+(r.reason||r.error||'failed')}btn.disabled=false;}
+ if(r.ok){sp.className='ok';sp.textContent='✓ saved';setTimeout(()=>{if(sp)sp.textContent=''},1500)}else{sp.className='err';sp.textContent='✗ '+(r.reason||r.error||'failed')}sel.disabled=false;}
 
 async function drawBudgets(){const d=await jget('/api/budgets');if(!CHART.length){CHART=(await jget('/api/overview?period='+PERIOD)).chart}
  let h='<div class="card full"><h2>Budgets</h2>';

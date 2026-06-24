@@ -48,7 +48,18 @@ const RUN_TIMEOUT_MS = 60_000;
  *     no orphaned cmd.exe shim — the proven pattern for killing claude -p cleanly).
  *   - stdout is collected and resolved as a string; bounded by RUN_TIMEOUT_MS.
  */
-export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS): ClaudeRunner {
+export interface RunnerOpts {
+  /**
+   * Tools the headless `claude -p` call may use WITHOUT an interactive prompt. Setting
+   * this both ENABLES those tools and RESTRICTS to exactly them — everything else
+   * (Write/Edit/Bash/...) is denied. Used to give the council read-only internet research
+   * (e.g. ["WebSearch","WebFetch"]) while keeping it incapable of mutating anything. When
+   * omitted, no tools are allowlisted (text-only; the safe default for categorize/extract).
+   */
+  allowedTools?: string[];
+}
+
+export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS, opts: RunnerOpts = {}): ClaudeRunner {
   return {
     run(prompt: string): Promise<string> {
       return new Promise<string>((resolve, reject) => {
@@ -63,10 +74,17 @@ export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS): ClaudeRun
         // Override with LLM_MODEL. All ride the Max plan ($0) since the API key is stripped.
         const model = process.env.LLM_MODEL || "claude-opus-4-8";
 
+        const args = ["-p", prompt, "--output-format", "text", "--model", model];
+        // Allowlist ONLY the named tools (e.g. web research) — headless mode auto-approves
+        // these and denies all others, so the runner can read the internet but never write.
+        if (opts.allowedTools && opts.allowedTools.length > 0) {
+          args.push("--allowedTools", opts.allowedTools.join(" "));
+        }
+
         // stdin MUST be ignored: `claude -p` otherwise waits for piped stdin, warns
         // "no stdin data received in 3s", and exits 1 — failing every call. Ignoring
         // stdin makes it use the -p prompt argument immediately. (stdout/stderr piped.)
-        const child = spawn("claude", ["-p", prompt, "--output-format", "text", "--model", model], {
+        const child = spawn("claude", args, {
           env,
           shell: false,
           windowsHide: true,
@@ -412,10 +430,15 @@ export class ClaudeCouncil implements CouncilEscalator {
       personaPreamble(),
       "",
       "A transaction could not be categorized automatically. Convene a three-voice",
-      "council and argue to ONE verdict:",
+      "council and argue to ONE verdict, then SETTLE IT with your best professional judgement:",
       "  - operator: what is the most defensible business categorization?",
       "  - skeptic: what would an auditor challenge? is this aggressive or mixed-use?",
       "  - strategist: is there missing context that would change the answer?",
+      "",
+      "You may use INTERNET RESEARCH (the WebSearch / WebFetch tools) when it would change",
+      "your answer — most often to identify an unfamiliar merchant or vendor (what do they",
+      "sell? is it a SaaS/dev tool, a game, a restaurant, a streaming service?). A quick",
+      "search usually resolves an ambiguous name. Do NOT research what you already know.",
       "",
       "Chart of accounts (code  name  type):",
       chartLines,
@@ -430,16 +453,19 @@ export class ClaudeCouncil implements CouncilEscalator {
       `  memo: ${input.memo}`,
       `  posted: ${input.postedDate ?? "unknown"}`,
       "",
-      "Rules: NEVER guess into a confident post. If a deduction is aggressive (large",
-      "home-office %, 100% vehicle, large §179, entity change, or any money movement),",
-      "set humanGate and do NOT resolve. If you genuinely need data you don't have (e.g.",
-      "an itemized receipt, access to a specific account), set needsAccess and do NOT resolve.",
+      "SETTLE ordinary ambiguity yourself: research the merchant if needed, weigh the three",
+      "voices, and RESOLVE with the most defensible category at an honest confidence — do not",
+      "punt a routine call to a human. Set confidence to reflect your certainty AFTER any",
+      "research. Reserve escalation for genuinely hard cases only:",
+      "  - aggressive deduction (large home-office %, 100% vehicle, large §179, entity change,",
+      "    any money movement) -> set humanGate, do NOT resolve.",
+      "  - a position that needs substantiation you cannot infer (e.g. an itemized receipt or",
+      "    business-purpose record for a meal) -> set needsAccess, do NOT resolve.",
       "",
-      "Even when you are NOT confident enough to resolve, still give your best single",
-      "accountCode AND a short `candidates` list of every DEFENSIBLE account this could",
-      "reasonably be (best first). List only categories a reasonable accountant would",
-      "actually stand behind for this transaction — never an aggressive or implausible one.",
-      "These candidates may be auto-selected, so do not pad the list.",
+      "Always give your best single accountCode AND a short `candidates` list of every",
+      "DEFENSIBLE account this could reasonably be (best first). List only categories a",
+      "reasonable accountant would actually stand behind — never an aggressive or implausible",
+      "one. These candidates may be auto-selected, so do not pad the list.",
       "",
       "Return ONLY a JSON object (no prose, no code fences) with exactly these keys:",
       "  resolved    (boolean; true only for a confident, safe categorization)",
