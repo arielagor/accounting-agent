@@ -253,6 +253,9 @@ async function drawSmb(){const d=await jget('/api/smb');
  $('#wrap').innerHTML=h;}
 
 async function drawReview(){const d=await jget('/api/review?period='+PERIOD);CHART=d.chart;const opts=chartOpts();
+ // Business expense categories only (codes 5000–6899: COGS + ordinary expenses; excludes the
+ // audit-sensitive 6900 vehicle / 6950 home office and the 9xxx personal accounts).
+ const bizOpts=CHART.filter(c=>{const n=parseInt(c.code,10);return n>=5000&&n<6900;}).map(c=>'<option value="'+c.code+'">'+esc(c.name)+'</option>').join('');
  const pos=await jget('/api/positions');
  let h='';
  if(pos.count){h+='<div class="card full"><h2>What the agent did for you — '+pos.count+' to confirm ('+usd(pos.totalDeductibleCents)+' in deductions)</h2>'
@@ -263,13 +266,24 @@ async function drawReview(){const d=await jget('/api/review?period='+PERIOD);CHA
  h+='<div class="card full"><div class="row2" style="justify-content:space-between"><h2 style="margin:0">To review — '+d.quarantine.length+' need a call</h2><button class="primary" onclick="runAudit(this)" title="Let the auditor + council resolve what it can">Run auditor</button></div>'
    +'<table><tr><th>Date</th><th>Merchant</th><th class="r">Amount</th><th>Reason</th><th>Categorize as</th><th></th></tr>'
    +d.quarantine.map(q=>'<tr class="qrow" data-id="'+q.sourceTxnId+'"><td class="muted">'+(q.date||'')+'</td><td>'+esc(q.merchant)+'</td><td class="r">'+usd(q.amountCents)+'</td><td class="muted">'+esc(q.reason)+'</td><td><select>'+opts+'</select></td><td><button onclick="resolveQ(this)">Save</button> <span class="ok"></span></td></tr>').join('')+'</table></div>';
- if(d.accessRequests.length){h+='<div class="card full"><h2>Access requests — the agent needs your OK</h2>'
-   +d.accessRequests.map(a=>'<div class="row2" style="justify-content:space-between;border-bottom:1px solid var(--line);padding:8px 0"><div><b>'+esc(a.resource)+'</b><div class="sub">'+esc(a.reason)+'</div><div class="sub muted">'+esc(a.howToGrant)+'</div></div><div class="row2"><button class="primary" onclick="grant('+a.id+',\\'granted\\',this)">Grant</button><button onclick="grant('+a.id+',\\'denied\\',this)">Deny</button> <span class="ok"></span></div></div>').join('')+'</div>';}
+ if(d.accessRequests.length){h+='<div class="card full"><h2>The agent needs your call — business or personal?</h2>'
+   +'<div class="sub" style="margin-bottom:8px">The agent wasn\\'t sure these were deductible. You decide: <b>Business</b> books it as a deduction (pick the category), <b>Personal</b> books it as a non-deductible personal expense. It learns your call for next time.</div>'
+   +d.accessRequests.map(a=>'<div class="arow" data-id="'+a.id+'" data-txn="'+esc(a.requestedForTxn||'')+'" style="border-bottom:1px solid var(--line);padding:10px 0">'
+     +'<div><b>'+esc(a.resource)+'</b><div class="sub">'+esc(a.reason)+'</div></div>'
+     +'<div class="row2" style="margin-top:6px"><select class="bizcat">'+bizOpts+'</select>'
+     +'<button class="primary" onclick="decideAccess(this,\\'business\\')">Business</button>'
+     +'<button onclick="decideAccess(this,\\'personal\\')">Personal</button> <span class="ok"></span></div></div>').join('')+'</div>';}
  $('#wrap').innerHTML=h;}
 async function resolveQ(btn){const tr=btn.closest('tr');const r=await jpost('/api/resolve',{sourceTxnId:tr.dataset.id,accountCode:tr.querySelector('select').value});
  const sp=tr.querySelector('.ok');if(r.ok){sp.textContent='✓ posted';setTimeout(()=>tr.remove(),500)}else{sp.className='err';sp.textContent='✗ '+(r.reason||r.error)}}
 async function runAudit(btn){btn.disabled=true;btn.textContent='Auditing…';const r=await jpost('/api/audit/run',{});if(r.ok){var s=r.summary;var to=s.taxOptimized||0;var td=s.taxDeferredConservative||0;var opt=to?(' ('+to+' tax calls for you to confirm above)'):'';var def=td?(', '+td+' left for you (low-confidence deductions not taken)'):'';alert('Auditor: '+s.autoPosted+' sorted'+opt+def+', '+s.escalated+' need a closer look, '+s.quarantined+' still need you.')}draw()}
-async function grant(id,decision,btn){const r=await jpost('/api/access',{id,decision});const sp=btn.parentElement.querySelector('.ok');if(r.ok){sp.textContent='✓';setTimeout(draw,400)}else{sp.className='err';sp.textContent='✗'}}
+async function decideAccess(btn,bucket){const row=btn.closest('.arow');const id=Number(row.dataset.id);const txn=row.dataset.txn;
+ const code=bucket==='business'?row.querySelector('.bizcat').value:'9500';
+ btn.disabled=true;const sp=row.querySelector('.ok');sp.className='ok';sp.textContent='saving…';
+ let ok=true,err='';
+ if(txn){const r=await jpost('/api/resolve',{sourceTxnId:txn,accountCode:code});ok=!!r.ok;if(!ok)err=r.reason||r.error||'failed'}
+ if(ok){await jpost('/api/access',{id,decision:'granted'});sp.textContent='✓ '+bucket;setTimeout(()=>row.remove(),500)}
+ else{sp.className='err';sp.textContent='✗ '+err;btn.disabled=false}}
 async function confirmPos(btn){const tr=btn.closest('tr');const ref=tr.dataset.ref;btn.disabled=true;const r=await jpost('/api/positions/confirm',{ref});const sp=tr.querySelector('.ok');if(r.ok){sp.textContent='✓ kept';setTimeout(()=>tr.remove(),400)}else{sp.className='err';sp.textContent='✗';btn.disabled=false}}
 async function flipPos(btn){const tr=btn.closest('tr');const ref=tr.dataset.ref;btn.disabled=true;const r=await jpost('/api/positions/flip',{ref});const sp=tr.querySelector('.ok');if(r.ok){sp.textContent='✓ personal';setTimeout(()=>tr.remove(),400)}else{sp.className='err';sp.textContent='✗ '+(r.error||'');btn.disabled=false}}
 
