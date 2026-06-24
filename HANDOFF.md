@@ -64,6 +64,18 @@ the foundation this builds on; its details live in git history + the GBrain proj
     AR/AP aging->Money owed to you / Bills you owe, posted->done, tie-out->"books need a check", chart codes
     dropped from the surface); tabs renamed (Apple purchases / Invoices & bills / Needs you). Verified live
     in-browser, no console errors. Deferred: a deep IA restructure (Money/Spending/Get-paid/To-do).
+  - **Auto-save + council judgement + internet research (2026-06-24):** (1) Transactions tab auto-saves
+    on category pick (no Save button); uncategorized rows show a neutral "— choose category —" placeholder
+    and `saveTxn` no-ops on empty. (2) The ClaudeCouncil prompt now SETTLES ordinary ambiguity with best
+    judgement (resolve at honest confidence) instead of punting; escalation reserved for aggressive
+    deductions (humanGate) and missing substantiation (needsAccess) — the Type-I floor + sensitive/large
+    gates + aggregate sign-off still apply downstream. (3) `spawnClaudeRunner(timeout, {allowedTools})`:
+    the council runner is created with `allowedTools ["WebSearch","WebFetch"]` (env `AUDITOR_RESEARCH`,
+    default on, 180s timeout) so it can research unfamiliar merchants read-only — and this RESTRICTS the
+    headless claude -p to those tools only (no Write/Edit/Bash, safer than the prior unrestricted spawn).
+    Web research mechanism verified live (standalone `claude -p --allowedTools "WebSearch WebFetch"`
+    actually searched + returned sources, $0 Max plan). NOTE: this raises auditor autonomy — more review
+    items get auto-settled; first live run still best observed / in draft.
 - **Verified live:** web app renders + tab-switches in-browser; tax-optimize proven by DB-backed tests that post
   to the real ledger + exercise every guard; `npm run advise` generated 13 grounded recommendations on real books.
 
