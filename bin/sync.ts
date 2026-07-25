@@ -152,8 +152,15 @@ async function main(): Promise<void> {
         const acctMap = await upsertAccounts(sql, conn, accessToken);
         const provider = getProvider(conn.provider as ProviderName);
         let cursor = sinceCursor ?? conn.sync_cursor;
+        const warnings: string[] = [];
         for (;;) {
           const page = await provider.syncTransactions(accessToken, cursor);
+          // A per-institution re-auth prompt rides along a 200 OK: the aggregator keeps
+          // serving the healthy institutions, so without this the connection stays
+          // 'active' while one bank quietly stops delivering. Collect, then escalate.
+          for (const w of page.warnings ?? []) {
+            if (!warnings.includes(w)) warnings.push(w);
+          }
           for (const t of [...page.added, ...page.modified]) {
             const accountId = acctMap.get(t.providerAccountId);
             if (!accountId) continue; // txn for an account we couldn't map; skip safely
@@ -171,6 +178,23 @@ async function main(): Promise<void> {
         await sql`UPDATE acct_connections SET sync_cursor = ${cursor}, last_synced_at = now(),
           status = 'active', consecutive_failures = 0 WHERE id = ${conn.id}`;
         log(`connection ${conn.id} (${conn.institution_name ?? conn.provider}) synced`);
+
+        // We deliberately re-request the full 90-day window every run, so the bridge's
+        // "date range exceeds limit ... and was capped" notice is expected and benign.
+        // Anything else means an institution needs attention.
+        const actionable = warnings.filter((w) => !/exceeds limit of \d+ days/i.test(w));
+        for (const w of actionable) warn(`connection ${conn.id}: ${w}`);
+        if (actionable.length > 0) {
+          await escalate(
+            env,
+            `[ACCOUNTING] Aggregator warning: ${conn.institution_name ?? "connection " + conn.id}`,
+            `The sync succeeded, but the aggregator flagged one or more institutions.\n` +
+              `Accounts at these institutions may be silently returning no new transactions:\n\n` +
+              actionable.map((w) => `  - ${w}`).join("\n") +
+              `\n\nRe-link with:\n  npm run link -- --reconnect ${conn.id}`,
+          );
+          escalations += 1;
+        }
       } catch (e) {
         if (isAuthError(e)) {
           await sql`UPDATE acct_connections SET status = 'login_required',

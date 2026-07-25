@@ -56,6 +56,8 @@ interface SimpleFinAccountJson {
 
 interface SimpleFinResponseJson {
   accounts?: SimpleFinAccountJson[];
+  /** Non-fatal per-institution warnings ("... may need attention. Auth required"). */
+  errors?: string[];
 }
 
 /** Format unix SECONDS as a UTC YYYY-MM-DD date string. */
@@ -76,9 +78,14 @@ function unixSecondsToYmd(sec: number): string {
 export function parseSimpleFinAccounts(json: unknown): {
   accounts: ProviderAccount[];
   transactions: ProviderTransaction[];
+  warnings: string[];
 } {
   const root = (json ?? {}) as SimpleFinResponseJson;
   const accountsJson = Array.isArray(root.accounts) ? root.accounts : [];
+  // SimpleFIN reports a per-institution re-auth prompt here while STILL returning
+  // HTTP 200 and the healthy institutions' data. Dropping it makes a partially dead
+  // feed indistinguishable from a working one.
+  const warnings = Array.isArray(root.errors) ? root.errors.filter((e) => typeof e === "string") : [];
 
   const accounts: ProviderAccount[] = [];
   const transactions: ProviderTransaction[] = [];
@@ -112,16 +119,36 @@ export function parseSimpleFinAccounts(json: unknown): {
     }
   }
 
-  return { accounts, transactions };
+  return { accounts, transactions, warnings };
 }
 
-/** Map a sync cursor to a start-date in unix SECONDS (null cursor → last 90 days). */
-function cursorToStartSeconds(cursor: string | null, nowSeconds: number): number {
-  if (cursor === null) return nowSeconds - NINETY_DAYS_SECONDS;
+/**
+ * Map a sync cursor to a start-date in unix SECONDS.
+ *
+ * The cursor may only ever WIDEN the window, never narrow it — it is clamped to at
+ * most `now - 90 days`. This is not an optimization, it is a correctness fix:
+ *
+ * SimpleFIN filters `start-date` on a transaction's POSTED date, and institutions
+ * post with a settlement lag (Amex/BofA/Wells Fargo backdate by several days; Citi
+ * posts same-day). `syncTransactions` advances the cursor to "now" after every run,
+ * so a nightly sync used to request only the last ~24h — and any transaction that
+ * landed with a posted date older than that fell outside the window permanently,
+ * because the cursor had already stepped past it. Fast-posting institutions synced
+ * fine while slow-posting ones went silently stale with `status = 'active'` and no
+ * error. (Observed live: the bridge held Amex transactions through 2026-07-23 while
+ * the ledger stopped at 2026-06-06.)
+ *
+ * Re-requesting the full window is safe and cheap: SimpleFIN caps history at ~90 days
+ * regardless of what we ask for, and ingestion is idempotent by `dedup_key`, so the
+ * overlap collapses to zero writes. An explicit older cursor (`--since`) still widens.
+ */
+export function cursorToStartSeconds(cursor: string | null, nowSeconds: number): number {
+  const ninetyDayFloor = nowSeconds - NINETY_DAYS_SECONDS;
+  if (cursor === null) return ninetyDayFloor;
   const parsed = Number(cursor);
   // A non-numeric/garbled cursor fails soft to the 90-day window rather than throwing.
-  if (!Number.isFinite(parsed)) return nowSeconds - NINETY_DAYS_SECONDS;
-  return Math.trunc(parsed);
+  if (!Number.isFinite(parsed)) return ninetyDayFloor;
+  return Math.min(Math.trunc(parsed), ninetyDayFloor);
 }
 
 /**
@@ -166,7 +193,7 @@ export class SimpleFinProvider implements AggregationProvider {
     cursor: string | null,
   ): Promise<ProviderSyncPage> {
     const json = await this.fetchAccounts(accessToken, cursor);
-    const { transactions } = parseSimpleFinAccounts(json);
+    const { transactions, warnings } = parseSimpleFinAccounts(json);
     const nowSeconds = Math.floor(Date.now() / 1000);
     return {
       added: transactions,
@@ -174,6 +201,7 @@ export class SimpleFinProvider implements AggregationProvider {
       removed: [],
       nextCursor: String(nowSeconds),
       hasMore: false,
+      warnings,
     };
   }
 

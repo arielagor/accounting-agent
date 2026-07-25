@@ -145,8 +145,8 @@ test("parseSimpleFinAccounts maps amount (signed cents), date (UTC YYYY-MM-DD), 
 });
 
 test("parseSimpleFinAccounts is null/shape-safe (empty object, missing accounts)", () => {
-  assert.deepEqual(parseSimpleFinAccounts({}), { accounts: [], transactions: [] });
-  assert.deepEqual(parseSimpleFinAccounts(null), { accounts: [], transactions: [] });
+  assert.deepEqual(parseSimpleFinAccounts({}), { accounts: [], transactions: [], warnings: [] });
+  assert.deepEqual(parseSimpleFinAccounts(null), { accounts: [], transactions: [], warnings: [] });
   const { transactions } = parseSimpleFinAccounts({
     accounts: [{ id: "x", name: "X" }],
   });

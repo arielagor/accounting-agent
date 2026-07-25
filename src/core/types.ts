@@ -161,6 +161,13 @@ export interface ProviderSyncPage {
   removed: string[]; // provider txn ids retracted
   nextCursor: string | null;
   hasMore: boolean;
+  /**
+   * Non-fatal warnings the aggregator returned alongside the data — typically an
+   * institution whose credentials need re-authentication. The HTTP call still
+   * succeeds and the OTHER institutions still return transactions, so this must be
+   * surfaced explicitly or a half-broken feed looks perfectly healthy.
+   */
+  warnings?: string[];
 }
 
 /** Connection status; auth-class failures escalate with zero retry. */
