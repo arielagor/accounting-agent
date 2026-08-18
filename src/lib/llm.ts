@@ -80,6 +80,13 @@ export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS, opts: Runn
         if (opts.allowedTools && opts.allowedTools.length > 0) {
           args.push("--allowedTools", opts.allowedTools.join(" "));
         }
+        // Load ZERO MCP servers. Without this, every call still boots the full
+        // user-scope MCP fleet (gbrain, github, stripe, chrome, ...), roughly ten
+        // node processes per invocation, none of which this runner uses — the
+        // allowlist above is the only tool surface it wants. Any server that
+        // outlives the parent orphans, which is how a machine accumulates
+        // hundreds of stray node.exe over weeks.
+        args.push("--strict-mcp-config");
 
         // stdin MUST be ignored: `claude -p` otherwise waits for piped stdin, warns
         // "no stdin data received in 3s", and exits 1 — failing every call. Ignoring
@@ -95,16 +102,14 @@ export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS, opts: Runn
         let stderr = "";
         let settled = false;
 
-        // Bounded run: kill the subprocess tree after the timeout. On win32 a plain
-        // child.kill() can leave the claude.exe orphaned, so prefer SIGKILL.
+        // Bounded run: kill the subprocess TREE after the timeout. SIGKILL on the
+        // direct child is not enough on win32 — claude spawns its own children and
+        // signalling the parent leaves them running. killTree shells out to
+        // taskkill /T, which is the only thing that reaps the whole group.
         const timer = setTimeout(() => {
           if (settled) return;
           settled = true;
-          try {
-            child.kill("SIGKILL");
-          } catch {
-            // Best-effort kill; if it fails the reject below still settles the promise.
-          }
+          killTree(child.pid);
           reject(new Error(`claude -p timed out after ${timeoutMs}ms`));
         }, timeoutMs);
 
@@ -119,6 +124,8 @@ export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS, opts: Runn
           if (settled) return;
           settled = true;
           clearTimeout(timer);
+          // Reap here too: a spawn error can still leave a partially started tree.
+          killTree(child.pid);
           reject(err);
         });
 
@@ -129,12 +136,38 @@ export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS, opts: Runn
           if (code === 0) {
             resolve(stdout);
           } else {
+            // A non-zero exit from the parent does not guarantee its children went
+            // with it. Sweep before rejecting.
+            killTree(child.pid);
             reject(new Error(`claude -p exited ${code}: ${stderr.trim() || "no stderr"}`));
           }
         });
       });
     },
   };
+}
+
+/**
+ * Kill a process and everything it spawned. On win32 only `taskkill /T` walks the
+ * tree; process.kill / child.kill signal the direct child alone and leave claude's
+ * own children (MCP servers) running forever. Best effort by design: the caller has
+ * already settled its promise, so a failure here must never throw into the close.
+ */
+function killTree(pid: number | undefined): void {
+  if (!pid) return;
+  try {
+    if (process.platform === "win32") {
+      spawn("taskkill", ["/pid", String(pid), "/T", "/F"], {
+        stdio: "ignore",
+        shell: false,
+        windowsHide: true,
+      });
+    } else {
+      process.kill(pid, "SIGKILL");
+    }
+  } catch {
+    /* best effort */
+  }
 }
 
 // ─── Drift-tolerant JSON extraction ───────────────────────────────────────────
