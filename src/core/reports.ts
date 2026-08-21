@@ -11,6 +11,21 @@ import { estimate } from "./tax/index.js";
 
 const CASH_CODES = ["1010", "1020", "1090"];
 
+/**
+ * Slug for the synthetic bucket holding posted revenue/expense that carries no
+ * project attribution. It is NOT a row in acct_projects.
+ *
+ * Why it exists: the portfolio P&L is the entity's real P&L and must contain
+ * every posted dollar (it feeds Schedule C and the estimated-tax set-aside).
+ * The per-project view used an INNER JOIN on acct_projects, so any line with a
+ * NULL project_id was silently dropped, and the tie-out gate
+ * (perProjectNet === portfolio.netCents) could never hold once a single
+ * unattributed expense existed. Dropping the line from the entity P&L would
+ * misstate income; dropping it from the project view hides overhead and makes
+ * projects look more profitable than the business is. Surfacing it does neither.
+ */
+export const UNASSIGNED_PROJECT_SLUG = "(unassigned)";
+
 export interface ProjectPnl {
   projectSlug: string;
   projectName: string;
@@ -91,25 +106,33 @@ export async function buildPerProjectPnl(
   period: string,
 ): Promise<ProjectPnl[]> {
   const { start, end } = periodBounds(period);
-  // Tenant filter MUST be a line-level WHERE (via the entry join), not a LEFT JOIN ON
+  // Tenant filter MUST be a line-level WHERE (via the entry join), never a JOIN ON
   // condition — otherwise other tenants' lines on a shared project leak into the sum
-  // and break the tie-out. INNER JOINs + WHERE; the HAVING drops zero-activity projects.
+  // and break the tie-out. The acct_projects join is a LEFT JOIN on purpose so lines
+  // with a NULL project_id land in UNASSIGNED_PROJECT_SLUG instead of vanishing; the
+  // tenant filter stays in WHERE, so widening that one join leaks nothing. The HAVING
+  // drops zero-activity projects.
   const rows = await sql<
     { slug: string; name: string; revenue: string; expense: string }[]
   >`
-    SELECT p.slug, p.name,
+    SELECT COALESCE(p.slug, ${UNASSIGNED_PROJECT_SLUG}) AS slug,
+           COALESCE(p.name, 'Unassigned') AS name,
       COALESCE(SUM(CASE WHEN c.type = 'revenue' THEN l.credit_cents - l.debit_cents ELSE 0 END), 0) AS revenue,
       COALESCE(SUM(CASE WHEN c.type IN ('expense','cogs') THEN l.debit_cents - l.credit_cents ELSE 0 END), 0) AS expense
     FROM acct_journal_lines l
     JOIN acct_journal_entries e ON e.id = l.entry_id
-    JOIN acct_projects p ON p.id = l.project_id
+    LEFT JOIN acct_projects p ON p.id = l.project_id
     JOIN acct_chart c ON c.id = l.account_id
     WHERE e.tenant_id = ${tenantId} AND e.status = 'posted'
       AND e.entry_date BETWEEN ${start} AND ${end}
-    GROUP BY p.slug, p.name
+    -- Ordinals, not repeated COALESCE(...) expressions: postgres.js binds the same
+    -- JS value as a DISTINCT placeholder per occurrence, so COALESCE(p.slug, $a) in
+    -- GROUP BY and COALESCE(p.slug, $b) in ORDER BY are not the same expression to
+    -- Postgres and it rejects the query.
+    GROUP BY 1, 2, (p.id IS NULL)
     HAVING COALESCE(SUM(CASE WHEN c.type='revenue' THEN l.credit_cents - l.debit_cents ELSE 0 END),0) <> 0
         OR COALESCE(SUM(CASE WHEN c.type IN ('expense','cogs') THEN l.debit_cents - l.credit_cents ELSE 0 END),0) <> 0
-    ORDER BY p.slug
+    ORDER BY (p.id IS NULL), 1
   `;
   return rows.map((r) => {
     const revenueCents = Number(r.revenue);

@@ -10,6 +10,7 @@ import { openSql, type Sql } from "../src/core/db.js";
 import { loadEnv } from "../src/lib/env.js";
 import { runClose } from "../src/core/close.js";
 import { computeVerdict } from "../src/core/verify.js";
+import { UNASSIGNED_PROJECT_SLUG, buildPerProjectPnl, buildPortfolioPnl } from "../src/core/reports.js";
 import { normalizeMerchant } from "../src/core/categorize.js";
 import type { CloseConfig, EntityProfile } from "../src/core/types.js";
 
@@ -131,6 +132,30 @@ test("close completes balanced, auto-posts confident txns, quarantines the ambig
     WHERE e.tenant_id = ${TENANT} AND e.status = 'posted'
       AND p.slug = 'shared' AND c.code IN ('6160','6150')`;
   assert.equal(Number(sharedNet[0]!.net), 0, "shared nets to zero after allocation");
+});
+
+test("unattributed expense lands in the unassigned bucket and the report ties out", async (t) => {
+  if (!dbUp) return t.skip("no database");
+  // NETLIFY (-1900) categorizes to an account with no project. Before this was
+  // fixed, buildPerProjectPnl INNER JOINed acct_projects, so that line vanished
+  // from the per-project view while remaining in the portfolio P&L. The tie-out
+  // gate then failed every close that contained a single unattributed expense,
+  // which is what left tests 72/73 red. Dropping it from the entity P&L instead
+  // would have misstated Schedule C, so the bucket is the correct resolution.
+  // Reads the reports directly rather than re-running the close: the period is
+  // already locked by the test above, and a locked re-run short-circuits to a
+  // no-op that never assembles a close package.
+  const perProject = await buildPerProjectPnl(sql, TENANT, PERIOD);
+  const portfolio = await buildPortfolioPnl(sql, TENANT, PERIOD);
+
+  const unassigned = perProject.find((r) => r.projectSlug === UNASSIGNED_PROJECT_SLUG);
+  assert.ok(unassigned, "an unattributed expense must surface as its own bucket, never be dropped");
+  assert.equal(unassigned!.expenseCents, 1900, "NETLIFY's $19.00 is the unattributed expense");
+  assert.equal(unassigned!.netCents, -1900);
+
+  // The gate itself: every posted dollar appears in exactly one project bucket.
+  const perProjectNet = perProject.reduce((a, r) => a + r.netCents, 0);
+  assert.equal(perProjectNet, portfolio.netCents, "sum of per-project net must equal portfolio net");
 });
 
 test("re-running a locked period is a no-op (idempotent, no double-post)", async (t) => {

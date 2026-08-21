@@ -245,7 +245,7 @@ export async function runClose(
     const verdict: CloseVerdict = {
       ...(await computeVerdict(sql, tenantId, period)),
       status: "FAILED",
-      failureReason: "report tie-out mismatch (portfolio net != trial-balance net)",
+      failureReason: "report tie-out mismatch (sum of per-project net != portfolio net)",
     };
     await writeCloseRecord(sql, tenantId, period, config, verdict, closePackage, false);
     await finish("failed");
