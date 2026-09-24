@@ -67,7 +67,7 @@ const taxLeanConfidenceFloor =
 // unfamiliar merchants). AUDITOR_RESEARCH=0 makes the council text-only.
 const auditorResearch = (env.AUDITOR_RESEARCH ?? "1") !== "0";
 const councilRunner = () =>
-  auditorResearch ? spawnClaudeRunner(180_000, { allowedTools: ["WebSearch", "WebFetch"] }) : spawnClaudeRunner();
+  auditorResearch ? spawnClaudeRunner(180_000, { allowedTools: ["WebSearch", "WebFetch"], job: "accounting:audit" }) : spawnClaudeRunner();
 
 if (host !== "127.0.0.1" && host !== "localhost" && !token) {
   error(`refusing to bind ${host} without DASHBOARD_TOKEN — set a token or bind 127.0.0.1`);

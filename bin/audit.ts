@@ -47,7 +47,7 @@ async function main(): Promise<void> {
   // disables research (text-only council). Research adds web latency → a longer timeout.
   const research = (env.AUDITOR_RESEARCH ?? "1") !== "0";
   const councilRunner = research
-    ? spawnClaudeRunner(180_000, { allowedTools: ["WebSearch", "WebFetch"] })
+    ? spawnClaudeRunner(180_000, { allowedTools: ["WebSearch", "WebFetch"], job: "accounting:audit" })
     : spawnClaudeRunner();
   const sql = openSql(env.ACCT_DB_URL);
   try {

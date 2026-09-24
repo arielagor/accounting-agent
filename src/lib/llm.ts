@@ -17,6 +17,9 @@
  * a 0-confidence, no-split proposal so the caller quarantines the txn for review.
  */
 import { spawn } from "node:child_process";
+import os from "node:os";
+import path from "node:path";
+import { pathToFileURL } from "node:url";
 import type {
   CategorizationInput,
   LlmCategorizeContext,
@@ -50,99 +53,58 @@ const RUN_TIMEOUT_MS = 60_000;
  */
 export interface RunnerOpts {
   /**
-   * Tools the headless `claude -p` call may use WITHOUT an interactive prompt. Setting
-   * this both ENABLES those tools and RESTRICTS to exactly them — everything else
-   * (Write/Edit/Bash/...) is denied. Used to give the council read-only internet research
-   * (e.g. ["WebSearch","WebFetch"]) while keeping it incapable of mutating anything. When
-   * omitted, no tools are allowlisted (text-only; the safe default for categorize/extract).
+   * Tools the headless call may use (e.g. ["WebSearch","WebFetch"] for the council's
+   * read-only research). Only the web tools are ever grantable. Omitted = text-only.
    */
   allowedTools?: string[];
+  /** Ledger label, e.g. "accounting:categorize". */
+  job?: string;
+  /**
+   * Model tier via ~/.claude/scripts/lib/model-tiers.json (2026-09-24 token plan):
+   * fast = Haiku 4.5 (chart-of-accounts categorization), standard = Sonnet 5 (default:
+   * document extraction, audits), deep = Opus 5.5.
+   */
+  tier?: "deep" | "standard" | "fast";
 }
 
+type LeanModule = { runClaude: (prompt: string, o: Record<string, unknown>) => Promise<{ text: string }> };
+let lean: Promise<LeanModule> | null = null;
+function leanModule(): Promise<LeanModule> {
+  const p = process.env.LEAN_CLAUDE_LIB || path.join(os.homedir(), ".claude", "scripts", "lib", "lean-claude.mjs");
+  lean ??= import(pathToFileURL(p).href) as Promise<LeanModule>;
+  return lean;
+}
+
+const GRANTABLE = new Set(["WebSearch", "WebFetch"]);
+
+/**
+ * A ClaudeRunner on the Max plan, through the shared lean seam
+ * (~/.claude/scripts/lib/lean-claude.mjs, 2026-09-24). The seam strips ANTHROPIC_API_KEY
+ * by construction (the mandatory cost rule), loads no CLAUDE.md, skills, hooks or MCP
+ * (~500 harness tokens per call instead of ~93K), tree-kills on every exit path, and
+ * writes one ledger row per call to ~/.claude/logs/llm-ledger.jsonl. A plan-limit reply
+ * ("you've hit your weekly limit") is thrown as an error, never returned as text, so the
+ * categorizer degrades to its 0-confidence quarantine exactly as for any other failure.
+ * (On 2026-09-24 all 19 nightly calls returned that message and were silently treated as
+ * low-confidence answers.)
+ */
 export function spawnClaudeRunner(timeoutMs: number = RUN_TIMEOUT_MS, opts: RunnerOpts = {}): ClaudeRunner {
+  const tools = (opts.allowedTools ?? []).filter((t) => GRANTABLE.has(t));
   return {
-    run(prompt: string): Promise<string> {
-      return new Promise<string>((resolve, reject) => {
-        // Copy the environment, then strip the paid-API key so the call rides the
-        // Max plan. Without this delete, claude -p silently bills the API.
-        const env = { ...process.env };
-        delete env.ANTHROPIC_API_KEY;
-
-        // Pin an explicit model: claude -p defaults to the session's configured model
-        // (the SOTA Fable 5), which can be "currently unavailable" and then exits 1 on
-        // every call. Fallback ladder per Ariel: Fable 5 -> Opus 4.8 (NOT Sonnet/Haiku).
-        // Override with LLM_MODEL. All ride the Max plan ($0) since the API key is stripped.
-        const model = process.env.LLM_MODEL || "claude-opus-4-8";
-
-        const args = ["-p", prompt, "--output-format", "text", "--model", model];
-        // Allowlist ONLY the named tools (e.g. web research) — headless mode auto-approves
-        // these and denies all others, so the runner can read the internet but never write.
-        if (opts.allowedTools && opts.allowedTools.length > 0) {
-          args.push("--allowedTools", opts.allowedTools.join(" "));
-        }
-        // Load ZERO MCP servers. Without this, every call still boots the full
-        // user-scope MCP fleet (gbrain, github, stripe, chrome, ...), roughly ten
-        // node processes per invocation, none of which this runner uses — the
-        // allowlist above is the only tool surface it wants. Any server that
-        // outlives the parent orphans, which is how a machine accumulates
-        // hundreds of stray node.exe over weeks.
-        args.push("--strict-mcp-config");
-
-        // stdin MUST be ignored: `claude -p` otherwise waits for piped stdin, warns
-        // "no stdin data received in 3s", and exits 1 — failing every call. Ignoring
-        // stdin makes it use the -p prompt argument immediately. (stdout/stderr piped.)
-        const child = spawn("claude", args, {
-          env,
-          shell: false,
-          windowsHide: true,
-          stdio: ["ignore", "pipe", "pipe"],
-        });
-
-        let stdout = "";
-        let stderr = "";
-        let settled = false;
-
-        // Bounded run: kill the subprocess TREE after the timeout. SIGKILL on the
-        // direct child is not enough on win32 — claude spawns its own children and
-        // signalling the parent leaves them running. killTree shells out to
-        // taskkill /T, which is the only thing that reaps the whole group.
-        const timer = setTimeout(() => {
-          if (settled) return;
-          settled = true;
-          killTree(child.pid);
-          reject(new Error(`claude -p timed out after ${timeoutMs}ms`));
-        }, timeoutMs);
-
-        child.stdout.on("data", (chunk: Buffer) => {
-          stdout += chunk.toString("utf8");
-        });
-        child.stderr.on("data", (chunk: Buffer) => {
-          stderr += chunk.toString("utf8");
-        });
-
-        child.on("error", (err) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          // Reap here too: a spawn error can still leave a partially started tree.
-          killTree(child.pid);
-          reject(err);
-        });
-
-        child.on("close", (code) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          if (code === 0) {
-            resolve(stdout);
-          } else {
-            // A non-zero exit from the parent does not guarantee its children went
-            // with it. Sweep before rejecting.
-            killTree(child.pid);
-            reject(new Error(`claude -p exited ${code}: ${stderr.trim() || "no stderr"}`));
-          }
-        });
+    async run(prompt: string): Promise<string> {
+      const { runClaude } = await leanModule();
+      const r = await runClaude(prompt, {
+        job: opts.job ?? "accounting:llm",
+        tier: opts.tier ?? "standard",
+        effort: opts.tier === "fast" ? undefined : "low",
+        tools: tools.length ? tools.join(",") : undefined,
+        systemPrompt: tools.length
+          ? "You are a careful bookkeeping and tax research assistant. Use web search only to verify facts. Output only what is requested."
+          : undefined,
+        timeoutMs,
+        retries: 1,
       });
+      return r.text;
     },
   };
 }

@@ -352,6 +352,30 @@ export async function categorize(
       .sort((a, b) => a.priority - b.priority)
       .some((r) => regexRuleApplies(r, input) && r.needsSplit);
 
+  // Already asked, already quarantined, still waiting on a human: re-asking the model
+  // cannot change anything, so don't. Before this, every open txn was re-sent nightly and
+  // got the same quarantine (Gulp Brew Co 18x, Valley Inn 8x ...). The existing
+  // acct_review_queue row stays exactly as it is. Only a REAL prior answer counts
+  // (confidence > 0); a 0-confidence row is a failed call (spawn error, quota wall), and
+  // that transaction is asked again. Rules (tiers a/b) were checked above and still win.
+  if (opts.llm && !deterministicWillPost && !deterministicNeedsSplit) {
+    const pending = await sql<{ reason: string }[]>`
+      SELECT q.reason
+      FROM acct_review_queue q
+      WHERE q.source_txn_id = ${input.sourceTxnId}
+        AND q.status = 'open'
+        AND EXISTS (
+          SELECT 1 FROM acct_llm_decisions d
+          WHERE d.source_txn_id = q.source_txn_id AND d.confidence > 0
+        )
+      LIMIT 1
+    `;
+    if (pending.length > 0) {
+      log("categorize: still open for review, not re-asking the LLM", input.sourceTxnId);
+      return quarantine(input.sourceTxnId, pending[0]!.reason as Parameters<typeof quarantine>[1]);
+    }
+  }
+
   if (opts.llm && !deterministicWillPost && !deterministicNeedsSplit) {
     // The LLM MUST receive the chart of accounts + projects, or it cannot pick a
     // valid code and (correctly) refuses — quarantining everything. Load them here.
