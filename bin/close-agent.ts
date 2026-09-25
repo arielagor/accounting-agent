@@ -136,7 +136,7 @@ async function main(): Promise<void> {
     // --no-llm runs rules-only (fast; unmatched txns quarantine instead of calling claude -p).
     const noLlm = process.argv.includes("--no-llm");
     const llm: LlmCategorizer | undefined =
-      config.mode === "off" || noLlm ? undefined : new ClaudeCategorizer(spawnClaudeRunner(90_000, { job: "accounting:categorize", tier: "fast" }));
+      config.mode === "off" || noLlm ? undefined : new ClaudeCategorizer(spawnClaudeRunner(180_000, { job: "accounting:categorize", tier: "fast" }));
     const stripe = env.STRIPE_SECRET_KEY ? createStripeReader(env.STRIPE_SECRET_KEY) : undefined;
 
     log(`close-agent: mode=${mode} period=${period} rung=${config.mode} tenant=${tenant}`);
