@@ -534,7 +534,7 @@ async function buildExceptionEscalations(
       priority: "P1",
       title: `Bank re-link required: ${c.institution_name ?? "connection " + c.id}`,
       detail: "The connection expired; the close used the last good cutoff.",
-      replyHint: `run: npm run link -- --reconnect ${c.id}`,
+      replyHint: `new setup token from bridge.simplefin.org, then: npm run link -- --reconnect ${c.id} --setup-token <TOKEN>`,
     });
   }
 

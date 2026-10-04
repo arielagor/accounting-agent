@@ -191,7 +191,10 @@ async function main(): Promise<void> {
             `The sync succeeded, but the aggregator flagged one or more institutions.\n` +
               `Accounts at these institutions may be silently returning no new transactions:\n\n` +
               actionable.map((w) => `  - ${w}`).join("\n") +
-              `\n\nRe-link with:\n  npm run link -- --reconnect ${conn.id}`,
+              `\n\nFix it at the bridge, not here: the bank's login lives inside SimpleFIN.\n` +
+              `  1) Sign in at https://bridge.simplefin.org\n` +
+              `  2) Open the flagged institution and re-authenticate it (bank login / MFA)\n` +
+              `The next sync picks it up; no re-link of connection ${conn.id} is needed.`,
           );
           escalations += 1;
         }
@@ -202,7 +205,7 @@ async function main(): Promise<void> {
           await escalate(
             env,
             `[ACCOUNTING] Re-link required: ${conn.institution_name ?? "connection " + conn.id}`,
-            `The connection expired. Re-link with:\n  npm run link -- --reconnect ${conn.id}\nNo data was lost; the next sync resumes from the last cursor.`,
+            `The connection expired. Get a new setup token at https://bridge.simplefin.org, then:\n  npm run link -- --reconnect ${conn.id} --setup-token <TOKEN>\nNo data was lost; the next sync resumes from the last cursor.`,
           );
           escalations += 1;
           warn(`connection ${conn.id}: auth failure -> paused, escalated`);
