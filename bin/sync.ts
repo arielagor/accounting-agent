@@ -2,8 +2,9 @@
  * Nightly read-only transaction sync. Acquires a node lock, loads .env, and for
  * each active connection: lists accounts (upsert), pulls transactions incrementally
  * and UPSERTs them (idempotent by dedup_key — re-runs never double-ingest). An
- * auth-class failure (expired link) pauses that ONE connection and escalates by
- * email with zero retry; other connections still sync. Reconciliation runs in the
+ * auth-class failure (expired link) or an aggregator warning (e.g. a bank needing
+ * re-auth) is retried MAX_ATTEMPTS times before that ONE connection is paused /
+ * escalated by email; other connections still sync. Reconciliation runs in the
  * close (period-scoped), not here.
  *
  * Task: \Accounting\NightlySync   Usage: node --import tsx bin/sync.ts [--url <conn>]
@@ -110,6 +111,52 @@ async function upsertTxn(
   return "added";
 }
 
+/** Attempts per connection before anything is emailed (first run + 2 retries). */
+const MAX_ATTEMPTS = 3;
+const RETRY_DELAY_MS = Number(process.env.SYNC_RETRY_DELAY_MS ?? 3 * 60 * 1000);
+const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
+
+/** One full pass over a connection. Throws on provider errors; returns bridge warnings. */
+async function syncOnce(
+  sql: Sql,
+  conn: ConnRow,
+  accessToken: string,
+  sinceCursor: string | null,
+): Promise<{ added: number; modified: number; warnings: string[] }> {
+  let added = 0;
+  let modified = 0;
+  const acctMap = await upsertAccounts(sql, conn, accessToken);
+  const provider = getProvider(conn.provider as ProviderName);
+  let cursor = sinceCursor ?? conn.sync_cursor;
+  const warnings: string[] = [];
+  for (;;) {
+    const page = await provider.syncTransactions(accessToken, cursor);
+    // A per-institution re-auth prompt rides along a 200 OK: the aggregator keeps
+    // serving the healthy institutions, so without this the connection stays
+    // 'active' while one bank quietly stops delivering. Collect, then escalate.
+    for (const w of page.warnings ?? []) {
+      if (!warnings.includes(w)) warnings.push(w);
+    }
+    for (const t of [...page.added, ...page.modified]) {
+      const accountId = acctMap.get(t.providerAccountId);
+      if (!accountId) continue; // txn for an account we couldn't map; skip safely
+      const r = await upsertTxn(sql, conn, accountId, t);
+      if (r === "added") added += 1;
+      else modified += 1;
+    }
+    for (const removedId of page.removed) {
+      await sql`UPDATE acct_transactions_raw SET superseded_at = now()
+        WHERE tenant_id = ${conn.tenant_id} AND provider = ${conn.provider} AND provider_txn_id = ${removedId}`;
+    }
+    cursor = page.nextCursor;
+    if (!page.hasMore) break;
+  }
+  await sql`UPDATE acct_connections SET sync_cursor = ${cursor}, last_synced_at = now(),
+    status = 'active', consecutive_failures = 0 WHERE id = ${conn.id}`;
+  log(`connection ${conn.id} (${conn.institution_name ?? conn.provider}) synced`);
+  return { added, modified, warnings };
+}
+
 async function main(): Promise<void> {
   const env = loadEnv(join(root, ".env"));
   configureLogDir(join(root, "logs"));
@@ -148,72 +195,60 @@ async function main(): Promise<void> {
         escalations += 1;
         continue;
       }
-      try {
-        const acctMap = await upsertAccounts(sql, conn, accessToken);
-        const provider = getProvider(conn.provider as ProviderName);
-        let cursor = sinceCursor ?? conn.sync_cursor;
-        const warnings: string[] = [];
-        for (;;) {
-          const page = await provider.syncTransactions(accessToken, cursor);
-          // A per-institution re-auth prompt rides along a 200 OK: the aggregator keeps
-          // serving the healthy institutions, so without this the connection stays
-          // 'active' while one bank quietly stops delivering. Collect, then escalate.
-          for (const w of page.warnings ?? []) {
-            if (!warnings.includes(w)) warnings.push(w);
+      // Self-heal before escalating: a flagged institution or an auth blip is retried
+      // MAX_ATTEMPTS times, RETRY_DELAY_MS apart, and only a problem that survives
+      // every attempt is emailed. Re-runs are idempotent (dedup_key), so retrying is safe.
+      const name = conn.institution_name ?? "connection " + conn.id;
+      let actionable: string[] = [];
+      let authErr: unknown = null;
+      for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+        authErr = null;
+        try {
+          const r = await syncOnce(sql, conn, accessToken, sinceCursor);
+          added += r.added;
+          modified += r.modified;
+          // We deliberately re-request the full 90-day window every run, so the bridge's
+          // "date range exceeds limit ... and was capped" notice is expected and benign.
+          actionable = r.warnings.filter((w) => !/exceeds limit of \d+ days/i.test(w));
+          if (actionable.length === 0) break;
+          for (const w of actionable) warn(`connection ${conn.id} attempt ${attempt}/${MAX_ATTEMPTS}: ${w}`);
+        } catch (e) {
+          if (!isAuthError(e)) {
+            await sql`UPDATE acct_connections SET status = 'error',
+              consecutive_failures = consecutive_failures + 1 WHERE id = ${conn.id}`;
+            error(`connection ${conn.id}: sync error`, e instanceof Error ? e.message : String(e));
+            break;
           }
-          for (const t of [...page.added, ...page.modified]) {
-            const accountId = acctMap.get(t.providerAccountId);
-            if (!accountId) continue; // txn for an account we couldn't map; skip safely
-            const r = await upsertTxn(sql, conn, accountId, t);
-            if (r === "added") added += 1;
-            else modified += 1;
-          }
-          for (const removedId of page.removed) {
-            await sql`UPDATE acct_transactions_raw SET superseded_at = now()
-              WHERE tenant_id = ${conn.tenant_id} AND provider = ${conn.provider} AND provider_txn_id = ${removedId}`;
-          }
-          cursor = page.nextCursor;
-          if (!page.hasMore) break;
+          authErr = e;
+          warn(`connection ${conn.id} attempt ${attempt}/${MAX_ATTEMPTS}: auth failure`);
         }
-        await sql`UPDATE acct_connections SET sync_cursor = ${cursor}, last_synced_at = now(),
-          status = 'active', consecutive_failures = 0 WHERE id = ${conn.id}`;
-        log(`connection ${conn.id} (${conn.institution_name ?? conn.provider}) synced`);
+        if (attempt < MAX_ATTEMPTS) await sleep(RETRY_DELAY_MS);
+      }
+      const tried = `Tried ${MAX_ATTEMPTS} times, ${RETRY_DELAY_MS / 60000} min apart, before sending this.`;
 
-        // We deliberately re-request the full 90-day window every run, so the bridge's
-        // "date range exceeds limit ... and was capped" notice is expected and benign.
-        // Anything else means an institution needs attention.
-        const actionable = warnings.filter((w) => !/exceeds limit of \d+ days/i.test(w));
-        for (const w of actionable) warn(`connection ${conn.id}: ${w}`);
-        if (actionable.length > 0) {
-          await escalate(
-            env,
-            `[ACCOUNTING] Aggregator warning: ${conn.institution_name ?? "connection " + conn.id}`,
-            `The sync succeeded, but the aggregator flagged one or more institutions.\n` +
-              `Accounts at these institutions may be silently returning no new transactions:\n\n` +
-              actionable.map((w) => `  - ${w}`).join("\n") +
-              `\n\nFix it at the bridge, not here: the bank's login lives inside SimpleFIN.\n` +
-              `  1) Sign in at https://bridge.simplefin.org\n` +
-              `  2) Open the flagged institution and re-authenticate it (bank login / MFA)\n` +
-              `The next sync picks it up; no re-link of connection ${conn.id} is needed.`,
-          );
-          escalations += 1;
-        }
-      } catch (e) {
-        if (isAuthError(e)) {
-          await sql`UPDATE acct_connections SET status = 'login_required',
-            consecutive_failures = consecutive_failures + 1 WHERE id = ${conn.id}`;
-          await escalate(
-            env,
-            `[ACCOUNTING] Re-link required: ${conn.institution_name ?? "connection " + conn.id}`,
-            `The connection expired. Get a new setup token at https://bridge.simplefin.org, then:\n  npm run link -- --reconnect ${conn.id} --setup-token <TOKEN>\nNo data was lost; the next sync resumes from the last cursor.`,
-          );
-          escalations += 1;
-          warn(`connection ${conn.id}: auth failure -> paused, escalated`);
-        } else {
-          await sql`UPDATE acct_connections SET status = 'error',
-            consecutive_failures = consecutive_failures + 1 WHERE id = ${conn.id}`;
-          error(`connection ${conn.id}: sync error`, e instanceof Error ? e.message : String(e));
-        }
+      if (authErr) {
+        await sql`UPDATE acct_connections SET status = 'login_required',
+          consecutive_failures = consecutive_failures + 1 WHERE id = ${conn.id}`;
+        await escalate(
+          env,
+          `[ACCOUNTING] Re-link required: ${name}`,
+          `The connection expired. ${tried}\n\nGet a new setup token at https://bridge.simplefin.org, then:\n  npm run link -- --reconnect ${conn.id} --setup-token <TOKEN>\nNo data was lost; the next sync resumes from the last cursor.`,
+        );
+        escalations += 1;
+        warn(`connection ${conn.id}: auth failure after ${MAX_ATTEMPTS} attempts -> paused, escalated`);
+      } else if (actionable.length > 0) {
+        await escalate(
+          env,
+          `[ACCOUNTING] Aggregator warning: ${name}`,
+          `The sync succeeded, but the aggregator still flags these institutions. ${tried}\n` +
+            `Accounts at these institutions may be silently returning no new transactions:\n\n` +
+            actionable.map((w) => `  - ${w}`).join("\n") +
+            `\n\nFix it at the bridge, not here: the bank's login lives inside SimpleFIN.\n` +
+            `  1) Sign in at https://bridge.simplefin.org\n` +
+            `  2) Open the flagged institution and re-authenticate it (bank login / MFA)\n` +
+            `The next sync picks it up; no re-link of connection ${conn.id} is needed.`,
+        );
+        escalations += 1;
       }
     }
     await sql`UPDATE acct_sync_runs SET finished_at = now(), added = ${added}, modified = ${modified}, escalations = ${escalations} WHERE id = ${run!.id}`;
