@@ -33,3 +33,5 @@ exports/
 # Live Google Sheet: OAuth token + spreadsheet id (secret/local)
 .google-token.json
 .gsheet.json
+# Local launcher: embeds the dashboard auth token in its URL, machine-specific
+launch-accounting.ps1
