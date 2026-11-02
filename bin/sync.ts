@@ -10,6 +10,8 @@
  * Task: \Accounting\NightlySync   Usage: node --import tsx bin/sync.ts [--url <conn>]
  */
 import { join } from "node:path";
+import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
 import { loadEnv } from "../src/lib/env.js";
@@ -109,6 +111,33 @@ async function upsertTxn(
             ${t.currency}, ${t.postedDate}, ${t.authorizedDate}, ${t.pending}, ${t.description},
             ${t.merchantName}, ${t.categoryProvider}, ${sql.json(t.raw as Parameters<typeof sql.json>[0])})`;
   return "added";
+}
+
+const COMMITMENTS = join(homedir(), ".claude", "scripts", "commitments.mjs");
+const REAUTH_TAG = "SimpleFIN Bridge re-auth";
+
+/**
+ * Hand a flagged bank to Claude instead of emailing Ariel (Ariel, 2026-11-02: "instead of
+ * emailing me ... just log in and reconnect it for me"). The Bridge sign-in form has a robot
+ * check, so this cannot run headless from the cron; it becomes an open commitment that every
+ * Claude session sees on its first prompt, and Claude fixes it in Ariel's real Chrome.
+ * Returns true when the hand-off is recorded (new or already open), false if it failed.
+ */
+function queueBridgeReauth(warnings: string[]): boolean {
+  const list = spawnSync(process.execPath, [COMMITMENTS], { encoding: "utf8", timeout: 30_000 });
+  if (list.status !== 0) return false;
+  if (list.stdout.split(/\r?\n/).some((l) => / open /.test(l) && l.includes(REAUTH_TAG))) return true;
+  const text =
+    `${REAUTH_TAG}: ${warnings.join(" | ")}. In Chrome sign in at beta-bridge.simplefin.org as ariel@agor.me ` +
+    `(magic link: accounting-agent scripts/agorme-mail.mjs link "from:simplefin"), click Adjust on each non-OK ` +
+    `institution, choose the EMAIL code option and read it from gmail.mjs; then confirm the warning is gone. ` +
+    `Ask Ariel only if the bank wants his password.`;
+  const add = spawnSync(
+    process.execPath,
+    [COMMITMENTS, "add", text, "--project", root.replace(/\\/g, "/"), "--waiting", "nothing, do next"],
+    { encoding: "utf8", timeout: 30_000 },
+  );
+  return add.status === 0;
 }
 
 /** Attempts per connection before anything is emailed (first run + 2 retries). */
@@ -236,7 +265,12 @@ async function main(): Promise<void> {
         );
         escalations += 1;
         warn(`connection ${conn.id}: auth failure after ${MAX_ATTEMPTS} attempts -> paused, escalated`);
-      } else if (actionable.length > 0) {
+      }
+      // A bank flagged at the Bridge goes to Claude, not to Ariel's inbox. The email below
+      // is only the fallback for when the hand-off itself could not be recorded.
+      if (!authErr && actionable.length > 0 && conn.provider === "simplefin" && queueBridgeReauth(actionable)) {
+        log(`connection ${conn.id}: bridge re-auth handed to Claude (commitment): ${actionable.join(" | ")}`);
+      } else if (!authErr && actionable.length > 0) {
         await escalate(
           env,
           `[ACCOUNTING] Aggregator warning: ${name}`,
