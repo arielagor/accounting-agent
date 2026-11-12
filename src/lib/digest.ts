@@ -2,7 +2,7 @@
  * Escalation digest: render the month-end close into a plain-text email, then
  * send it. This is the single human-facing surface of the close engine, so the
  * RENDER half is a pure function (testable with zero IO) and the SEND half is a
- * thin transport wrapper around nodemailer.
+ * thin transport wrapper around the shared mail-core send path.
  *
  * HARD STYLE RULE (Ariel): the rendered email text must contain ZERO em-dash
  * characters. Em-dashes read as machine-written in his outbound mail, so every
@@ -10,7 +10,7 @@
  * asserts the rendered text never includes the em-dash code point.
  */
 
-import nodemailer from "nodemailer";
+import { send as mailCoreSend, envDryRun } from "./mailCore.js";
 import type {
   DigestModel,
   EscalationItem,
@@ -154,42 +154,58 @@ export interface MailTransport {
     to: string;
     subject: string;
     text: string;
-  }): Promise<{ accepted: string[] }>;
+    attachments?: { filename: string; content?: Buffer; path?: string }[];
+  }): Promise<{ accepted: string[]; messageId?: string | null; decision?: string }>;
 }
 
+/** The ledger names this repo sends under (stable: the contact ledger is keyed by them). */
+export const MAIL_SYSTEMS = {
+  closeDigest: "accounting-agent:close-digest",
+  sendDigest: "accounting-agent:send-digest",
+  syncEscalation: "accounting-agent:sync-escalation",
+} as const;
+
 /**
- * Build a real SMTP transport from environment config. Uses the implicit-TLS
- * port (465) with `secure: true`, the Gmail SMTP pattern used across the
- * portfolio. The returned object adapts nodemailer's response to MailTransport;
- * nodemailer's SentMessageInfo carries `accepted: string[]`.
+ * A MailTransport over the shared mail-core send path (one pooled transport per
+ * SMTP identity, preSendCheck, contact ledger). Every message this repo sends is
+ * internal mail to Ariel himself, so kind 'internal' and lane 'monitor'. The
+ * SMTP login is ariel@agor.me (mail-core identity 'agorme'); the From may be an
+ * address mail-core does not know as an alias (DIGEST_FROM), so the identity is
+ * named explicitly rather than inferred from From. Fields are passed through
+ * unchanged, so the mail is byte-identical to the old nodemailer transport.
+ * dryRun (or MAIL_CORE_DRYRUN=1) records the ledger row and sends nothing; the
+ * result then has no accepted recipients. `ctx` is mail-core's test seam.
  */
-export function buildNodemailerTransport(env: {
-  SMTP_HOST: string;
-  SMTP_PORT: string;
-  SMTP_USER: string;
-  SMTP_PASS: string;
-}): MailTransport {
-  const port = Number(env.SMTP_PORT);
-  const transporter = nodemailer.createTransport({
-    host: env.SMTP_HOST,
-    port,
-    // Implicit TLS on 465; any other port falls back to STARTTLS upgrade.
-    secure: port === 465,
-    auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
-  });
+export function buildMailCoreTransport(
+  system: string,
+  opts: { dryRun?: boolean; ctx?: Record<string, unknown> } = {},
+): MailTransport {
+  const dryRun = opts.dryRun ?? envDryRun();
   return {
-    async sendMail(opts) {
-      const info = await transporter.sendMail({
-        from: opts.from,
-        to: opts.to,
-        subject: opts.subject,
-        text: opts.text,
-      });
-      // Normalize: nodemailer's accepted is string[] for SMTP; guard the shape.
-      const accepted = Array.isArray(info.accepted)
-        ? info.accepted.map((a) => String(a))
+    async sendMail(msg) {
+      const r = await mailCoreSend(
+        {
+          system,
+          kind: "internal",
+          lane: "monitor",
+          identity: "agorme",
+          dryRun,
+          from: msg.from,
+          to: msg.to,
+          subject: msg.subject,
+          text: msg.text,
+          ...(msg.attachments ? { attachments: msg.attachments } : {}),
+        },
+        opts.ctx,
+      );
+      if (!r.sent) {
+        if (!dryRun) warn(`mail-core did not send (${r.decision}${r.reason ? `: ${r.reason}` : ""})`);
+        return { accepted: [], messageId: null, decision: r.decision };
+      }
+      const accepted = Array.isArray(r.info?.accepted)
+        ? r.info.accepted.map((a) => (typeof a === "object" && a && "address" in a ? String((a as { address: unknown }).address) : String(a)))
         : [];
-      return { accepted };
+      return { accepted, messageId: r.messageId, decision: r.decision };
     },
   };
 }

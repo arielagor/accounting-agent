@@ -1,12 +1,12 @@
 /**
  * Email the close digest + PDF + spreadsheet (surface 3 of 3). Renders the digest
  * text (no em-dashes), generates the close PDF, attaches the period's .xlsx if
- * present, and sends via the configured Gmail SMTP. --dry writes the PDF locally
+ * present, and sends through the shared mail-core send path (system
+ * accounting-agent:send-digest). --dry writes the PDF locally
  * and prints the digest instead of sending.
  *
  * Usage: node --import tsx bin/send-digest.ts [--period YYYY-MM] [--dry]
  */
-import nodemailer from "nodemailer";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { existsSync, writeFileSync } from "node:fs";
@@ -14,7 +14,8 @@ import { loadEnv } from "../src/lib/env.js";
 import { openSql } from "../src/core/db.js";
 import { getDashboardData } from "../src/lib/dashboard-data.js";
 import { computeVerdict } from "../src/core/verify.js";
-import { renderDigest } from "../src/lib/digest.js";
+import { renderDigest, buildMailCoreTransport, MAIL_SYSTEMS } from "../src/lib/digest.js";
+import { envDryRun } from "../src/lib/mailCore.js";
 import { buildClosePdf } from "../src/lib/pdf.js";
 import { formatUsd } from "../src/core/money.js";
 import { log, warn, error } from "../src/lib/log.js";
@@ -78,17 +79,12 @@ async function main(): Promise<void> {
       warn("SMTP not configured; cannot send. Run with --dry to preview.");
       return;
     }
-    const portNum = Number(env.SMTP_PORT ?? 465);
-    const transport = nodemailer.createTransport({
-      host: env.SMTP_HOST,
-      port: portNum,
-      secure: portNum === 465,
-      auth: { user: env.SMTP_USER, pass: env.SMTP_PASS },
-    });
+    const transport = buildMailCoreTransport(MAIL_SYSTEMS.sendDigest);
     const from = env.SMTP_USER; // authenticated sender (most reliable with Gmail)
     const to = env.DIGEST_TO ?? env.SMTP_USER;
     const info = await transport.sendMail({ from, to, subject, text, attachments });
-    log(`digest sent to ${to}: ${info.accepted?.length ? "accepted" : "not accepted"} (id ${info.messageId})`);
+    const dryNote = envDryRun() ? ", MAIL_CORE_DRYRUN: nothing sent" : "";
+    log(`digest sent to ${to}: ${info.accepted?.length ? "accepted" : "not accepted"} (id ${info.messageId}, mail-core ${info.decision}${dryNote})`);
   } catch (e) {
     error("send-digest failed:", e instanceof Error ? e.message : String(e));
     process.exitCode = 1;

@@ -20,7 +20,7 @@ import { acquireLock } from "../src/lib/lock.js";
 import { configureLogDir, log, warn, error } from "../src/lib/log.js";
 import { decryptSecret } from "../src/lib/token-store.js";
 import { getProvider, type ProviderName } from "../src/providers/index.js";
-import { buildNodemailerTransport } from "../src/lib/digest.js";
+import { buildMailCoreTransport, MAIL_SYSTEMS } from "../src/lib/digest.js";
 import type { ProviderTransaction } from "../src/core/types.js";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -50,12 +50,7 @@ async function escalate(env: Record<string, string>, subject: string, body: stri
       warn("escalation not sent (SMTP not configured):", subject);
       return;
     }
-    const transport = buildNodemailerTransport({
-      SMTP_HOST: env.SMTP_HOST,
-      SMTP_PORT: env.SMTP_PORT ?? "465",
-      SMTP_USER: env.SMTP_USER,
-      SMTP_PASS: env.SMTP_PASS,
-    });
+    const transport = buildMailCoreTransport(MAIL_SYSTEMS.syncEscalation);
     await transport.sendMail({
       from: env.DIGEST_FROM ?? env.SMTP_USER,
       to: env.DIGEST_TO ?? env.SMTP_USER,

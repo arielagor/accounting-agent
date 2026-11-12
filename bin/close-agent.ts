@@ -16,7 +16,7 @@ import { configureLogDir, log, warn, error } from "../src/lib/log.js";
 import { runClose } from "../src/core/close.js";
 import { createStripeReader } from "../src/lib/stripe.js";
 import { spawnClaudeRunner, ClaudeCategorizer } from "../src/lib/llm.js";
-import { buildNodemailerTransport, sendDigest } from "../src/lib/digest.js";
+import { buildMailCoreTransport, MAIL_SYSTEMS, sendDigest } from "../src/lib/digest.js";
 import { syncLiveSheet } from "../src/lib/gsheet-sync.js";
 import type {
   CloseConfig,
@@ -155,12 +155,7 @@ async function main(): Promise<void> {
     // Notify (SECONDARY: a send failure never flips the verdict).
     if (config.mode !== "off" && !result.noop) {
       if (env.SMTP_HOST && env.SMTP_USER && env.SMTP_PASS) {
-        const transport = buildNodemailerTransport({
-          SMTP_HOST: env.SMTP_HOST,
-          SMTP_PORT: env.SMTP_PORT ?? "465",
-          SMTP_USER: env.SMTP_USER,
-          SMTP_PASS: env.SMTP_PASS,
-        });
+        const transport = buildMailCoreTransport(MAIL_SYSTEMS.closeDigest);
         const sent = await sendDigest(
           transport,
           env.DIGEST_FROM ?? env.SMTP_USER,
